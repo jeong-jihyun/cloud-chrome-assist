@@ -6,10 +6,7 @@
 <title>Cloud Chrome 라이브 화면</title>
 <style>
   body{margin:0;background:#111;color:#eee;font:14px system-ui,sans-serif}
-  #bar{padding:6px 8px;background:#222;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-  #bar input{flex:1;min-width:140px;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   button{padding:8px 10px;border-radius:6px;border:0;background:#3b6ef5;color:#fff;font-size:14px}
-  button.s{background:#444}
   #tabs{display:flex;gap:4px;overflow-x:auto;padding:6px 8px 0;background:#181818;white-space:nowrap}
   #tabs button{background:#333;max-width:140px;overflow:hidden;text-overflow:ellipsis;border-radius:6px 6px 0 0}
   #tabs button.on{background:#3b6ef5}
@@ -17,6 +14,7 @@
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
+  #zfit{display:none;position:fixed;right:12px;bottom:24px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
   #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
   #msg{padding:4px 8px;color:#fc6;min-height:18px}
@@ -28,18 +26,9 @@
   <input id="url" placeholder="주소 입력 (예: naver.com)" autocapitalize="off" autocomplete="off" inputmode="url">
   <button id="go">이동</button>
 </div>
-<div id="bar">
-  <button class="s" data-k="Enter">Enter</button>
-  <button class="s" data-k="Tab">Tab</button>
-  <button class="s" data-k="Backspace">⌫</button>
-  <button class="s" id="zin">＋</button>
-  <button class="s" id="zout">－</button>
-  <button class="s" id="zfit">맞춤</button>
-  <button class="s" id="up">▲</button>
-  <button class="s" id="dn">▼</button>
-</div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
+<button id="zfit">맞춤</button>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 <script>
 const q = new URLSearchParams(location.search);
@@ -124,14 +113,8 @@ const applyView = () => {
   TX = clamp(TX, w - w * S, 0);
   TY = clamp(TY, h - h * S, 0);
   c.style.transform = 'translate(' + TX + 'px,' + TY + 'px) scale(' + S + ')';
+  document.getElementById('zfit').style.display = S > 1.01 ? 'block' : 'none';
 };
-const zoomBy = (f) => {
-  const cx = wrap.clientWidth / 2, cy = wrap.clientHeight / 2;
-  const px = (cx - TX) / S, py = (cy - TY) / S, S1 = clamp(S * f, 1, 4);
-  S = S1; TX = cx - px * S1; TY = cy - py * S1; applyView();
-};
-document.getElementById('zin').onclick = () => zoomBy(1.5);
-document.getElementById('zout').onclick = () => zoomBy(1 / 1.5);
 document.getElementById('zfit').onclick = () => { S = 1; TX = 0; TY = 0; applyView(); };
 window.addEventListener('resize', applyView);
 
@@ -227,9 +210,6 @@ txt.addEventListener('input', sync);
 txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
 txt.addEventListener('compositionend', sync);
 txt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sync(); send({ t: 'key', k: 'Enter' }); restart(); } });
-document.querySelectorAll('button[data-k]').forEach((b) => b.onclick = () => send({ t: 'key', k: b.dataset.k }));
-document.getElementById('up').onclick = () => send({ t: 'scroll', dy: -400 });
-document.getElementById('dn').onclick = () => send({ t: 'scroll', dy: 400 });
 </script>
 </body>
 </html>
