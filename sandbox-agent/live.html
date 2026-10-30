@@ -137,7 +137,7 @@ const txt = document.getElementById('txt');
 const wrap = document.getElementById('wrap');
 let S = 1, TX = 0, TY = 0;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const SMIN = 0.4, SMAX = 8; // pinch can shrink the picture below the screen size and magnify up to 8x
+const SMIN = 0.1, SMAX = 8; // pinch can shrink the picture below the screen size and magnify up to 8x
 let WW = 0, WH = 0, rafOn = false, zShown = false;
 const measure = () => { WW = wrap.clientWidth; WH = wrap.clientHeight; };
 const paint = () => {

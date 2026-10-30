@@ -589,7 +589,8 @@ async function act(body) {
   throw new Error('unknown action: ' + a);
 }
 
-const LIVE_HTML = fs.readFileSync(path.join(ROOT, 'live.html'), 'utf8');
+// read on every request, so a new screen file can be put in place without restarting Chrome
+const liveHtml = () => fs.readFileSync(path.join(ROOT, 'live.html'), 'utf8');
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -600,7 +601,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/health') return send(200, { ok: true });
   if (url.pathname === '/live') {
     if (!okToken(url.searchParams.get('token'))) return send(401, 'unauthorized', 'text/plain');
-    return send(200, LIVE_HTML, 'text/html; charset=utf-8');
+    return send(200, liveHtml(), 'text/html; charset=utf-8');
   }
   if (url.pathname === '/shot') {
     // One picture of what Chrome shows right now, at the phone's size: open it in any browser to see the real screen.
