@@ -16,6 +16,7 @@
   #tabs button.x{background:#7a2b2b}
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
+  #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
   #wrap{padding:4px}
   canvas{width:100%;height:auto;background:#000;touch-action:manipulation;display:block}
   #msg{padding:4px 8px;color:#fc6;min-height:18px}
@@ -28,15 +29,14 @@
   <button id="go">이동</button>
 </div>
 <div id="bar">
-  <input id="txt" placeholder="여기에 치거나 붙여넣기 (비밀번호도 바로 들어감)" autocomplete="off" autocapitalize="off">
-  <button id="send">입력</button>
   <button class="s" data-k="Enter">Enter</button>
   <button class="s" data-k="Tab">Tab</button>
   <button class="s" data-k="Backspace">⌫</button>
   <button class="s" id="up">▲</button>
   <button class="s" id="dn">▼</button>
 </div>
-<div id="msg">화면의 로그인 칸을 탭하면 키패드가 뜹니다. 치는 글자가 바로 입력됩니다(붙여넣기도 됨).</div>
+<input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
+<div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 <script>
 const q = new URLSearchParams(location.search);
@@ -139,7 +139,6 @@ txt.addEventListener('input', sync);
 txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
 txt.addEventListener('compositionend', sync);
 txt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sync(); send({ t: 'key', k: 'Enter' }); restart(); } });
-document.getElementById('send').onclick = () => { sync(); };
 document.querySelectorAll('button[data-k]').forEach((b) => b.onclick = () => send({ t: 'key', k: b.dataset.k }));
 document.getElementById('up').onclick = () => send({ t: 'scroll', dy: -400 });
 document.getElementById('dn').onclick = () => send({ t: 'scroll', dy: 400 });
