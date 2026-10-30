@@ -167,6 +167,64 @@ async function isSecretField(loc) {
   }).catch(() => false);
 }
 
+// A text field found by what the page shows (placeholder, label) or by its name/id attribute: works across page loads.
+function fieldLocator(p, f) {
+  const q = f.replace(/["\\]/g, '');
+  const fields = p.locator('input:not([type=hidden]),textarea,[contenteditable=true]');
+  return p.getByPlaceholder(f).or(p.getByLabel(f)).or(p.locator(`[name="${q}"],[id="${q}"]`)).and(fields).first();
+}
+
+// ---- macros: named lists of steps saved by Claude and replayed by name ----
+const MACRO_FILE = path.join(ROOT, 'macros.json');
+const MACRO_ACTIONS = ['navigate', 'click', 'type', 'key', 'scroll', 'back', 'wait', 'tab_new', 'tab_switch', 'tab_close'];
+const MACRO_FIELDS = ['action', 'url', 'text', 'field', 'selector', 'key', 'dy', 'ms', 'n', 'submit'];
+const readMacros = () => { try { return JSON.parse(fs.readFileSync(MACRO_FILE, 'utf8')); } catch { return {}; } };
+const writeMacros = (m) => fs.writeFileSync(MACRO_FILE, JSON.stringify(m, null, 1), { mode: 0o600 });
+const macroName = (n) => {
+  const v = String(n || '').trim();
+  if (!/^[\w가-힣 -]{1,40}$/.test(v)) throw new Error('매크로 이름은 글자·숫자·공백·-·_ 만 쓰고 40자 이하여야 합니다.');
+  return v;
+};
+const describeStep = (st) => {
+  const bits = [st.url, st.text && '"' + st.text + '"', st.field && '[' + st.field + ']', st.selector, st.key, st.n != null && '#' + st.n, st.ms && st.ms + 'ms'].filter(Boolean);
+  return st.action + (bits.length ? ' ' + bits.join(' ') : '');
+};
+const fillVars = (st, vars) => {
+  const out = {};
+  for (const [k, v] of Object.entries(st)) {
+    out[k] = typeof v === 'string'
+      ? v.replace(/\{\{(\w+)\}\}/g, (_, name) => {
+          if (vars[name] === undefined) throw new Error('변수 {{' + name + '}} 값이 필요합니다. 실행할 때 vars로 알려 주세요.');
+          return String(vars[name]);
+        })
+      : v;
+  }
+  return out;
+};
+
+async function runMacro(body) {
+  const name = macroName(body.name);
+  const macro = readMacros()[name];
+  if (!macro) throw new Error('"' + name + '" 매크로가 없습니다. 목록: ' + (Object.keys(readMacros()).join(', ') || '(없음)'));
+  const vars = body.vars && typeof body.vars === 'object' ? body.vars : {};
+  const log = [];
+  let last = '';
+  for (let i = 0; i < macro.steps.length; i++) {
+    const step = macro.steps[i];
+    try {
+      const filled = fillVars(step, vars);
+      if (filled.action === 'wait') { await new Promise((r) => setTimeout(r, Math.min(Number(filled.ms) || 1000, 10000))); last = ''; }
+      else { const r = await act(filled); if (r.error) throw new Error(r.error); last = r.text || ''; }
+      log.push((i + 1) + '. ' + describeStep(step) + ' ✓');
+    } catch (e) {
+      log.push((i + 1) + '. ' + describeStep(step) + ' ✗ ' + String(e.message || e).slice(0, 200));
+      return { text: '매크로 "' + name + '" 이(가) ' + (i + 1) + '번째 단계에서 멈췄습니다.\n' + log.join('\n') };
+    }
+  }
+  last = await snapshot(await ensure()); // always end with what the page shows now
+  return { text: '매크로 "' + name + '" 완료 (' + macro.steps.length + '단계)\n' + log.join('\n') + '\n\n' + last };
+}
+
 async function act(body) {
   const a = body.action;
   if (a === 'status') {
@@ -179,6 +237,39 @@ async function act(body) {
     ctx = null; page = null;
     return { text: 'browser closed (profile and logins kept)' };
   }
+  if (a === 'macro_list') {
+    const all = readMacros();
+    const names = Object.keys(all);
+    return { text: names.length ? names.map((n) => n + ' (' + all[n].steps.length + '단계' + (all[n].note ? ' - ' + all[n].note : '') + ')\n   ' + all[n].steps.map(describeStep).join(' → ')).join('\n') : '저장된 매크로가 없습니다.' };
+  }
+  if (a === 'macro_save') {
+    const name = macroName(body.name);
+    const steps = Array.isArray(body.steps) ? body.steps : [];
+    if (!steps.length) throw new Error('steps(단계 목록)가 비어 있습니다.');
+    if (steps.length > 50) throw new Error('단계는 최대 50개입니다.');
+    const clean = steps.map((st, i) => {
+      if (!st || !MACRO_ACTIONS.includes(st.action)) throw new Error((i + 1) + '번째 단계의 action이 올바르지 않습니다. 사용 가능: ' + MACRO_ACTIONS.join(', '));
+      if (st.action === 'type' && !st.field) throw new Error((i + 1) + '번째 단계: type은 field(입력칸의 안내글·이름)가 필요합니다. 번호(id)는 페이지를 열 때마다 바뀌어 매크로에 쓸 수 없습니다.');
+      if (st.action === 'click' && !st.text && !st.selector) throw new Error((i + 1) + '번째 단계: click은 text 또는 selector가 필요합니다.');
+      if (st.action === 'navigate' && !/^https?:\/\//i.test(String(st.url || ''))) throw new Error((i + 1) + '번째 단계: navigate의 url은 http(s)://로 시작해야 합니다.');
+      return Object.fromEntries(MACRO_FIELDS.filter((k) => st[k] !== undefined).map((k) => [k, st[k]]));
+    });
+    const all = readMacros();
+    const existed = !!all[name];
+    all[name] = { steps: clean, note: String(body.note || '').slice(0, 80), saved: new Date().toISOString() };
+    writeMacros(all);
+    return { text: '매크로 "' + name + '" ' + (existed ? '덮어써서 ' : '') + '저장했습니다 (' + clean.length + '단계).\n' + clean.map((st, i) => (i + 1) + '. ' + describeStep(st)).join('\n') };
+  }
+  if (a === 'macro_delete') {
+    const name = macroName(body.name);
+    const all = readMacros();
+    if (!all[name]) throw new Error('"' + name + '" 매크로가 없습니다.');
+    delete all[name];
+    writeMacros(all);
+    return { text: '매크로 "' + name + '" 삭제했습니다.' };
+  }
+  if (a === 'macro_run') return runMacro(body);
+  if (a === 'wait') { await new Promise((r) => setTimeout(r, Math.min(Number(body.ms) || 1000, 10000))); return { text: 'waited' }; }
   const p = await ensure();
   if (a === 'tabs') return { text: tabText(await tabList()) };
   if (a === 'tab_new') {
@@ -204,13 +295,15 @@ async function act(body) {
   }
   if (a === 'snapshot') return { text: await snapshot(p) };
   if (a === 'click') {
-    const loc = body.id ? p.locator(`[data-ca-id="${Number(body.id)}"]`).first() : p.getByText(String(body.text || ''), { exact: false }).first();
+    const loc = body.id ? p.locator(`[data-ca-id="${Number(body.id)}"]`).first()
+      : body.selector ? p.locator(String(body.selector)).first()
+      : p.getByText(String(body.text || ''), { exact: false }).first();
     await loc.click({ timeout: 8000 });
     await settle(page || p);
     return { text: await snapshot(page || p) };
   }
   if (a === 'type') {
-    const loc = p.locator(`[data-ca-id="${Number(body.id)}"]`).first();
+    const loc = body.field ? fieldLocator(p, String(body.field)) : p.locator(`[data-ca-id="${Number(body.id)}"]`).first();
     if (await isSecretField(loc)) throw new Error(PW_MSG);
     await loc.fill(String(body.text ?? ''), { timeout: 8000 });
     if (body.submit) await p.keyboard.press('Enter');
