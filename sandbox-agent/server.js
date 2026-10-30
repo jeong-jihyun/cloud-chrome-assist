@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 let pw;
 try { pw = require('playwright-core'); } catch { pw = require('playwright'); }
 const { WebSocketServer } = require('ws');
@@ -283,21 +284,47 @@ function zipFromBuffer(buf) {
   throw new Error('zip 또는 crx 파일이 아닙니다.');
 }
 
-function loadAdmZip() {
-  try { return require('adm-zip'); } catch {}
-  require('child_process').execFileSync('npm', ['install', '--no-audit', '--no-fund', 'adm-zip'], { cwd: ROOT, stdio: 'ignore', timeout: 120000 });
-  return require('adm-zip');
+// Minimal zip reader with no dependency (Node's zlib does the inflating). Browser extensions only use "deflate"
+// and "stored" entries, which is all this supports. Sizes are capped so a zip bomb cannot fill the disk.
+const MAX_UNZIPPED = 400 * 1024 * 1024;
+function readZipEntries(buf) {
+  const bad = () => new Error('zip 파일이 손상되었거나 지원하지 않는 형식입니다.');
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65535); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw bad();
+  const count = buf.readUInt16LE(eocd + 10), cdOffset = buf.readUInt32LE(eocd + 16);
+  if (count === 0xFFFF || cdOffset === 0xFFFFFFFF) throw new Error('zip64 형식은 지원하지 않습니다.');
+  const out = [];
+  let p = cdOffset;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) throw bad();
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20), usize = buf.readUInt32LE(p + 24);
+    const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
+    out.push({ name: buf.toString('utf8', p + 46, p + 46 + nameLen).replace(/\\/g, '/'), method, csize, usize, localOff: buf.readUInt32LE(p + 42) });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+function zipEntryData(buf, e) {
+  const lo = e.localOff;
+  if (lo + 30 > buf.length || buf.readUInt32LE(lo) !== 0x04034b50) throw new Error('zip 파일이 손상되었습니다.');
+  const start = lo + 30 + buf.readUInt16LE(lo + 26) + buf.readUInt16LE(lo + 28);
+  const raw = buf.subarray(start, start + e.csize);
+  if (e.method === 0) return raw;
+  if (e.method === 8) return zlib.inflateRawSync(raw, { maxOutputLength: Math.max(e.usize, 1) + 1024 });
+  throw new Error('지원하지 않는 압축 방식입니다.');
 }
 
 function unzipInto(zipBuf, dest) {
-  const AdmZip = loadAdmZip();
+  const entries = readZipEntries(zipBuf);
+  if (entries.reduce((n, e) => n + e.usize, 0) > MAX_UNZIPPED) throw new Error('압축을 풀면 너무 큽니다(최대 400MB).');
   fs.mkdirSync(dest, { recursive: true });
   const root = path.resolve(dest) + path.sep;
-  for (const e of new AdmZip(zipBuf).getEntries()) {
-    const out = path.resolve(dest, e.entryName);
+  for (const e of entries) {
+    const out = path.resolve(dest, e.name);
     if (!out.startsWith(root)) continue; // never write outside the folder ("../" in a file name)
-    if (e.isDirectory) fs.mkdirSync(out, { recursive: true });
-    else { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, e.getData()); }
+    if (e.name.endsWith('/')) fs.mkdirSync(out, { recursive: true });
+    else { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, zipEntryData(zipBuf, e)); }
   }
 }
 

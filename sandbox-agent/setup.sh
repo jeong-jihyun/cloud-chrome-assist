@@ -13,7 +13,7 @@ for p in libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdr
   sudo apt-get install -y --no-install-recommends "$p" || echo "SKIP $p"
 done
 sudo ldconfig
-npm install --no-audit --no-fund playwright-core ws adm-zip || exit 1
+npm install --no-audit --no-fund playwright-core ws || exit 1
 npx playwright-core install chromium || exit 1
 touch .ready
 echo SETUP_DONE
