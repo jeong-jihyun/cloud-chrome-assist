@@ -113,7 +113,11 @@ const txt = document.getElementById('txt');
 c.addEventListener('click', (e) => {
   const r = c.getBoundingClientRect();
   send({ t: 'click', x: (e.clientX - r.left) * c.width / r.width, y: (e.clientY - r.top) * c.height / r.height });
-  txt.focus({ preventScroll: true }); // phone keyboard pops up right after tapping a field on the screen
+  // Phone keyboard pops up right after tapping a field on the screen. The hidden input is moved to the tapped spot
+  // first, so the browser has nothing to scroll to (a box at the top of the page made the screen jump up).
+  txt.style.left = Math.round(e.clientX) + 'px';
+  txt.style.top = Math.round(e.clientY) + 'px';
+  txt.focus({ preventScroll: true });
 });
 // Typing: the box is only a buffer. After every change it is compared with what was sent last, and only the
 // difference (new letters, or Backspaces for deleted ones) goes to Chrome. The page never rewrites the box while
