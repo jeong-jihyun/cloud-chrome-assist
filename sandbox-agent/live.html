@@ -137,16 +137,23 @@ const txt = document.getElementById('txt');
 const wrap = document.getElementById('wrap');
 let S = 1, TX = 0, TY = 0;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+let WW = 0, WH = 0, rafOn = false, zShown = false;
+const measure = () => { WW = wrap.clientWidth; WH = wrap.clientHeight; };
+const paint = () => {
+  rafOn = false;
+  c.style.transform = 'translate3d(' + TX + 'px,' + TY + 'px,0) scale(' + S + ')';
+  const z = S > 1.01;
+  if (z !== zShown) { zShown = z; document.getElementById('zfit').style.display = z ? 'block' : 'none'; }
+};
 const applyView = () => {
-  const w = wrap.clientWidth, h = wrap.clientHeight;
+  if (!WW) measure();
   S = clamp(S, 1, 4);
-  TX = clamp(TX, w - w * S, 0);
-  TY = clamp(TY, h - h * S, 0);
-  c.style.transform = 'translate(' + TX + 'px,' + TY + 'px) scale(' + S + ')';
-  document.getElementById('zfit').style.display = S > 1.01 ? 'block' : 'none';
+  TX = clamp(TX, WW - WW * S, 0);
+  TY = clamp(TY, WH - WH * S, 0);
+  if (!rafOn) { rafOn = true; requestAnimationFrame(paint); } // at most one style write per screen frame
 };
 document.getElementById('zfit').onclick = () => { S = 1; TX = 0; TY = 0; applyView(); };
-window.addEventListener('resize', applyView);
+window.addEventListener('resize', () => { measure(); applyView(); });
 
 function tapAt(x, y) {
   const r = c.getBoundingClientRect(); // already includes the zoom/pan transform
@@ -187,7 +194,8 @@ wrap.addEventListener('touchstart', (e) => {
   if (e.touches.length === 2) {
     const [a, b] = e.touches;
     clearTimeout(lpTimer);
-    gest = { mode: 'pinch', d: dist(a, b), cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, S0: S, TX0: TX, TY0: TY };
+    measure();
+    gest = { mode: 'pinch', r: wrap.getBoundingClientRect(), d: dist(a, b), cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, S0: S, TX0: TX, TY0: TY };
     e.preventDefault();
   } else if (e.touches.length === 1) {
     const t = e.touches[0];
@@ -201,7 +209,7 @@ wrap.addEventListener('touchmove', (e) => {
   e.preventDefault();
   if (gest.mode === 'pinch' && e.touches.length === 2) {
     const [a, b] = e.touches;
-    const r = wrap.getBoundingClientRect();
+    const r = gest.r;
     const S1 = clamp(gest.S0 * dist(a, b) / gest.d, 1, 4);
     // keep the point that was under the fingers at the start under the fingers now
     const px = (gest.cx - r.left - gest.TX0) / gest.S0, py = (gest.cy - r.top - gest.TY0) / gest.S0;
@@ -210,13 +218,17 @@ wrap.addEventListener('touchmove', (e) => {
   } else if (gest.mode === 'one' && e.touches.length === 1) {
     const t = e.touches[0];
     if (!gest.moved && Math.hypot(t.clientX - gest.x, t.clientY - gest.y) > 8) { clearTimeout(lpTimer); gest.moved = true; gest.lx = gest.x; gest.ly = gest.y; }
-    if (gest.moved) {
+    if (gest.moved && S > 1.01) {
+      // zoomed in: the finger moves the picture itself, so any spot can be brought into view
+      TX += t.clientX - gest.lx; TY += t.clientY - gest.ly;
+      gest.lx = t.clientX; gest.ly = t.clientY; applyView();
+    } else if (gest.moved) {
       const r = c.getBoundingClientRect(), k = (vw || c.width) / r.width; // screen px -> page px
       scrollAcc.dx -= (t.clientX - gest.lx) * k;
       scrollAcc.dy -= (t.clientY - gest.ly) * k;
       scrollAcc.x = (t.clientX - r.left) * k; scrollAcc.y = (t.clientY - r.top) * k;
       gest.lx = t.clientX; gest.ly = t.clientY;
-      if (!scrollAcc.timer) scrollAcc.timer = setTimeout(flushScroll, 40);
+      if (!scrollAcc.timer) scrollAcc.timer = setTimeout(flushScroll, 20);
     }
   }
 }, { passive: false });
