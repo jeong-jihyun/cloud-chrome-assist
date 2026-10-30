@@ -75,13 +75,18 @@ const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 // ---- browser size = this phone's screen ----
 // The remote Chrome gets exactly the width and height available here, and 1-2x pixel density so text stays sharp.
 // curDpr: how many picture pixels make one page pixel (needed to turn taps into page coordinates).
+// Z: pinching in below 1x really zooms the web page out (Chrome gets a bigger window with a smaller pixel density, so
+// the picture keeps the phone's pixel size but shows more of the page). Z = 1 is normal size.
+let Z = 1;
+const ZMIN = 0.2;
 let vw = 0, vh = 0, curDpr = 1, sizeTimer = null;
 function reportSize(force) {
   const r = wrap.getBoundingClientRect();
-  const w = Math.round(wrap.clientWidth), h = Math.round(Math.max(280, innerHeight - r.top - 10));
+  const w = Math.round(wrap.clientWidth / Z), h = Math.round(Math.max(280, innerHeight - r.top - 10) / Z);
   if (!force && document.activeElement === txt && w === vw) return; // keyboard opening: leave the remote page alone
   if (!force && w === vw && Math.abs(h - vh) < 4) return;
-  const dpr = Math.min(2, Math.max(1, Math.round((window.devicePixelRatio || 1) * 10) / 10));
+  const base = Math.min(2, Math.max(1, Math.round((window.devicePixelRatio || 1) * 10) / 10));
+  const dpr = Math.min(2, Math.max(0.25, Math.round(base * Z * 20) / 20));
   vw = w; vh = h; curDpr = dpr;
   send({ t: 'viewport', w, h, dpr });
 }
@@ -137,24 +142,35 @@ const txt = document.getElementById('txt');
 const wrap = document.getElementById('wrap');
 let S = 1, TX = 0, TY = 0;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const SMIN = 0.1, SMAX = 8; // pinch can shrink the picture below the screen size and magnify up to 8x
+const SMAX = 8; // magnify up to 8x; shrinking is real page zoom (Z) after the fingers lift
+const smin = () => ZMIN / Z;
 let WW = 0, WH = 0, rafOn = false, zShown = false;
 const measure = () => { WW = wrap.clientWidth; WH = wrap.clientHeight; };
 const paint = () => {
   rafOn = false;
   c.style.transform = 'translate3d(' + TX + 'px,' + TY + 'px,0) scale(' + S + ')';
-  const z = Math.abs(S - 1) > 0.01;
+  const z = Math.abs(S - 1) > 0.01 || Z < 0.99;
   if (z !== zShown) { zShown = z; document.getElementById('zfit').style.display = z ? 'block' : 'none'; }
 };
 const applyView = () => {
   if (!WW) measure();
-  S = clamp(S, SMIN, SMAX);
+  S = clamp(S, smin(), SMAX);
   // bigger than the screen: keep an edge on the screen; smaller: keep the whole picture on the screen
   TX = clamp(TX, Math.min(0, WW - WW * S), Math.max(0, WW - WW * S));
   TY = clamp(TY, Math.min(0, WH - WH * S), Math.max(0, WH - WH * S));
   if (!rafOn) { rafOn = true; requestAnimationFrame(paint); } // at most one style write per screen frame
 };
-document.getElementById('zfit').onclick = () => { S = 1; TX = 0; TY = 0; applyView(); };
+document.getElementById('zfit').onclick = () => { S = 1; TX = 0; TY = 0; if (Z !== 1) { Z = 1; reportSize(true); } applyView(); };
+// When the fingers lift: smaller than normal becomes a real page zoom-out (Chrome relayouts to a bigger window),
+// bigger than normal stays a magnified picture.
+function commitZoom() {
+  const total = Z * S;
+  const newZ = total >= 0.999 ? 1 : Math.max(ZMIN, Math.round(total * 20) / 20);
+  const newS = newZ === 1 ? Math.max(1, total) : 1;
+  if (Math.abs(newZ - Z) < 0.001) { S = newS; applyView(); return; }
+  Z = newZ; S = newS; TX = 0; TY = 0;
+  applyView(); reportSize(true);
+}
 window.addEventListener('resize', () => { measure(); applyView(); });
 
 function tapAt(x, y) {
@@ -212,7 +228,7 @@ wrap.addEventListener('touchmove', (e) => {
   if (gest.mode === 'pinch' && e.touches.length === 2) {
     const [a, b] = e.touches;
     const r = gest.r;
-    const S1 = clamp(gest.S0 * dist(a, b) / gest.d, SMIN, SMAX);
+    const S1 = clamp(gest.S0 * dist(a, b) / gest.d, smin(), SMAX);
     // keep the point that was under the fingers at the start under the fingers now
     const px = (gest.cx - r.left - gest.TX0) / gest.S0, py = (gest.cy - r.top - gest.TY0) / gest.S0;
     const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
@@ -242,6 +258,7 @@ wrap.addEventListener('touchend', (e) => {
     tapAt(t.clientX, t.clientY);
   }
   if (gest && gest.moved) flushScroll();
+  if (gest && gest.mode === 'pinch') commitZoom(); // first finger up ends the pinch
   if (e.touches.length === 0) gest = null;
   else if (e.touches.length === 1) gest = { mode: 'none' }; // one finger left after a pinch: ignore it (no tap, no scroll)
 }, { passive: false });

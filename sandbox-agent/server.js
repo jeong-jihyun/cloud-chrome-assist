@@ -647,7 +647,7 @@ wss.on('connection', async (ws) => {
   const stopCast = async () => { try { if (cdp) { await cdp.send('Page.stopScreencast').catch(() => {}); await cdp.detach().catch(() => {}); } } catch {} cdp = null; };
   // One capture at a time; if the screen changes meanwhile, capture again right after. The next capture starts only
   // when the previous picture has been written to the network, so slow connections never pile up old pictures.
-  let busy = false, dirty = false, viewTimer = null, healing = false;
+  let busy = false, dirty = false, viewTimer = null, healing = false, healCount = 0;
   const pump = async () => {
     if (busy) { dirty = true; return; }
     busy = true;
@@ -663,7 +663,8 @@ wss.on('connection', async (ws) => {
         // self-check: if the picture is not the size the phone asked for (Chrome sometimes drops the size setting
         // after a restart), rebuild the size connection from scratch and capture again
         const jw = jpegWidth(buf), want = Math.round(VIEWSPEC.w * VIEWSPEC.dpr);
-        if (jw && cur && Math.abs(jw - want) > 1 && VIEWSPEC.w !== VIEW.width && !healing) {
+        if (jw && cur && Math.abs(jw - want) > Math.max(3, want * 0.02) && VIEWSPEC.w !== VIEW.width && !healing && healCount < 3) {
+          healCount++;
           healing = true;
           try { viewSessions.delete(cur); await ensureView(cur, 3); } catch {}
           healing = false; dirty = true;
@@ -721,8 +722,9 @@ wss.on('connection', async (ws) => {
       else if (d.t === 'viewport') {
         // the phone tells its screen size: make every tab exactly that big, then restart the picture at the new size
         const cl = (v, a, b) => Math.min(b, Math.max(a, v));
-        VIEWSPEC = { w: cl(Math.round(Number(d.w)) || VIEW.width, 200, 2000), h: cl(Math.round(Number(d.h)) || VIEW.height, 200, 3000), dpr: cl(Number(d.dpr) || 1, 1, 3) };
+        VIEWSPEC = { w: cl(Math.round(Number(d.w)) || VIEW.width, 200, 4000), h: cl(Math.round(Number(d.h)) || VIEW.height, 200, 6000), dpr: cl(Number(d.dpr) || 1, 0.25, 3) };
         // Requests that arrive close together (the screen size can settle in two steps) are merged: only the last one is applied.
+        healCount = 0;
         clearTimeout(viewTimer);
         viewTimer = setTimeout(async () => {
           try {
