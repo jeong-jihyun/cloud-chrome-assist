@@ -483,6 +483,17 @@ async function act(body) {
     fs.rmSync(e.dir, { recursive: true, force: true });
     return { text: '확장 프로그램 "' + e.name + '" 삭제했습니다. ' + (await restartForExtensions(body.restart !== false)) };
   }
+  // structured lists for the phone screen (the text versions above are for Claude)
+  if (a === 'macro_data') {
+    const all = readMacros();
+    return { data: { macros: Object.keys(all).map((n) => ({
+      name: n, note: all[n].note || '', steps: all[n].steps.length, desc: all[n].steps.map(describeStep).join(' → '),
+      vars: [...new Set((JSON.stringify(all[n].steps).match(/\{\{(\w+)\}\}/g) || []).map((s) => s.slice(2, -2)))],
+    })) } };
+  }
+  if (a === 'ext_data') {
+    return { data: { exts: extList().map((e) => ({ slug: e.slug, name: e.name, version: e.version, running: e.running, popup: !!e.popup, options: !!e.options })) } };
+  }
   if (a === 'macro_list') {
     const all = readMacros();
     const names = Object.keys(all);

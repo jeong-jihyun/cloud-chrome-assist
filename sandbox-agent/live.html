@@ -10,17 +10,35 @@
   #tabs{min-height:38px;box-sizing:border-box;display:flex;gap:4px;overflow-x:auto;padding:6px 8px 0;background:#181818;white-space:nowrap}
   #tabs button{background:#333;max-width:140px;overflow:hidden;text-overflow:ellipsis;border-radius:6px 6px 0 0}
   #tabs button.on{background:#3b6ef5}
-  #tabs button.x{background:#7a2b2b}
+  #tabs .tab{display:flex;flex:0 0 auto;max-width:170px;border-radius:6px 6px 0 0;overflow:hidden;background:#333}
+  #tabs .tab.on{background:#3b6ef5}
+  #tabs .tab button{background:transparent;border-radius:0}
+  #tabs .tab .t{max-width:120px;overflow:hidden;text-overflow:ellipsis;padding-right:4px}
+  #tabs .tab .cx{padding:8px 10px;font-size:16px;line-height:1;opacity:.85}
+  #tabs #addtab{flex:0 0 auto}
+  #nav{position:fixed;left:0;right:0;bottom:0;height:52px;display:flex;background:#181818;border-top:1px solid #333;z-index:6}
+  #nav button{flex:1;border-radius:0;background:transparent;color:#aaa;font-size:15px}
+  #nav button.on{color:#fff;background:#262d44;font-weight:600}
+  .panel{display:none;padding:10px 10px 70px;overflow-y:auto}
+  .panel h3{margin:4px 0 8px;font-size:16px}
+  .card{background:#1d1d1d;border:1px solid #333;border-radius:8px;padding:10px;margin-bottom:8px}
+  .card .nm{font-weight:600}
+  .card .ds{color:#999;font-size:12px;margin:4px 0;word-break:break-all}
+  .card .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .card input,.panel input.add{padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px;min-width:0;flex:1}
+  .card button.del{background:#7a2b2b}
+  .empty{color:#888;padding:10px}
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
-  #zfit{display:none;position:fixed;right:12px;bottom:24px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
+  #zfit{display:none;position:fixed;right:12px;bottom:68px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
   #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
   #msg{padding:4px 8px;color:#fc6;min-height:18px}
 </style>
 </head>
 <body>
+<div id="browserView">
 <div id="tabs"></div>
 <div id="urlbar">
   <button id="back" aria-label="뒤로">◀</button>
@@ -32,6 +50,10 @@
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
 <button id="zfit">맞춤</button>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
+</div>
+<div id="macroView" class="panel"></div>
+<div id="extView" class="panel"></div>
+<div id="nav"><button id="nb" class="on">🌐 브라우저</button><button id="nm">⚡ 매크로</button><button id="ne">🧩 익스텐션</button></div>
 <script>
 const q = new URLSearchParams(location.search);
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || '');
@@ -81,8 +103,9 @@ let Z = 1;
 const ZMIN = 0.2;
 let vw = 0, vh = 0, curDpr = 1, sizeTimer = null;
 function reportSize(force) {
+  if (view !== 'browser') return;
   const r = wrap.getBoundingClientRect();
-  const w = Math.round(wrap.clientWidth / Z), h = Math.round(Math.max(280, innerHeight - r.top - 10) / Z);
+  const w = Math.round(wrap.clientWidth / Z), h = Math.round(Math.max(280, innerHeight - r.top - 10 - (navHidden ? 0 : 52)) / Z);
   if (!force && document.activeElement === txt && w === vw) return; // keyboard opening: leave the remote page alone
   if (!force && w === vw && Math.abs(h - vh) < 4) return;
   const base = Math.min(2, Math.max(1, Math.round((window.devicePixelRatio || 1) * 10) / 10));
@@ -93,35 +116,124 @@ function reportSize(force) {
 const reportSoon = () => { clearTimeout(sizeTimer); sizeTimer = setTimeout(() => reportSize(false), 300); };
 window.addEventListener('resize', reportSoon);
 window.addEventListener('orientationchange', reportSoon);
-// ---- tabs: tap a tab to switch, + opens a new one, x closes the current one ----
+// ---- tabs: tap a tab to switch, + opens a new one, each tab has its own x; the bar scrolls sideways when full ----
 const tabsEl = document.getElementById('tabs');
+let activeTabEl = null, lastActiveEl = null;
 function renderTabs(list) {
   const here = list.find((t) => t.active), urlBox = document.getElementById('url');
   if (here && document.activeElement !== urlBox) urlBox.placeholder = (here.url || '').replace(/^https?:\/\//, '') || '주소 입력 (예: naver.com)';
   tabsEl.textContent = '';
   list.forEach((t) => {
+    const box = document.createElement('div');
+    box.className = 'tab' + (t.active ? ' on' : '');
     const b = document.createElement('button');
+    b.className = 't';
     b.textContent = t.n + '. ' + (t.title || t.url || '새 탭');
-    if (t.active) b.className = 'on';
     b.onclick = () => { send({ t: 'tab', n: t.n }); };
-    tabsEl.appendChild(b);
+    const x = document.createElement('button');
+    x.className = 'cx';
+    x.textContent = '✕';
+    x.setAttribute('aria-label', '탭 ' + t.n + ' 닫기');
+    x.onclick = (ev) => { ev.stopPropagation(); send({ t: 'closetab', n: t.n }); };
+    box.appendChild(b); box.appendChild(x);
+    tabsEl.appendChild(box);
+    if (t.active) activeTabEl = box;
   });
   const add = document.createElement('button');
+  add.id = 'addtab';
   add.textContent = '+';
   add.onclick = () => send({ t: 'newtab' });
   tabsEl.appendChild(add);
-  if (list.length > 1) {
-    const x = document.createElement('button');
-    x.className = 'x';
-    x.textContent = '현재 탭 닫기';
-    x.onclick = () => send({ t: 'closetab' });
-    tabsEl.appendChild(x);
-  }
+  // many tabs: the bar scrolls sideways, and the current tab is brought into view
+  if (activeTabEl && activeTabEl !== lastActiveEl) { activeTabEl.scrollIntoView({ inline: 'nearest', block: 'nearest' }); }
+  lastActiveEl = activeTabEl;
   reportSoon(); // the tab bar changes the height left for the picture: measure again
 }
 setInterval(() => { if (ws && ws.readyState === 1) send({ t: 'tabs' }); else connect(); }, 1500);
 const refreshSoon = () => { setTimeout(() => send({ t: 'tabs' }), 600); setTimeout(() => send({ t: 'tabs' }), 1800); }; // address/title right after a page change
 connect();
+// ---- bottom bar: browser / macros / extensions ----
+let view = 'browser', navHidden = false;
+const API = (body) => fetch('/api', { method: 'POST', headers: { 'x-token': q.get('token') || '', 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+const els = { browser: document.getElementById('browserView'), macro: document.getElementById('macroView'), ext: document.getElementById('extView') };
+const navBtn = { browser: document.getElementById('nb'), macro: document.getElementById('nm'), ext: document.getElementById('ne') };
+function showView(v) {
+  view = v;
+  for (const k of Object.keys(els)) { els[k].style.display = k === v ? 'block' : 'none'; navBtn[k].className = k === v ? 'on' : ''; }
+  document.getElementById('zfit').style.visibility = v === 'browser' ? 'visible' : 'hidden';
+  if (v === 'browser') { measure(); reportSize(true); applyView(); }
+  if (v === 'macro') loadMacros();
+  if (v === 'ext') loadExts();
+}
+navBtn.browser.onclick = () => showView('browser');
+navBtn.macro.onclick = () => showView('macro');
+navBtn.ext.onclick = () => showView('ext');
+// the keyboard needs the room: hide the bottom bar while typing
+document.addEventListener('focusin', (e) => { if (e.target.tagName === 'INPUT') { navHidden = true; document.getElementById('nav').style.display = 'none'; } });
+document.addEventListener('focusout', () => { setTimeout(() => { if (document.activeElement && document.activeElement.tagName === 'INPUT') return; navHidden = false; document.getElementById('nav').style.display = 'flex'; }, 100); });
+const mk = (tag, props, ...kids) => { const e = document.createElement(tag); Object.assign(e, props || {}); kids.forEach((k) => e.append(k)); return e; };
+async function loadMacros() {
+  const box = els.macro; box.textContent = '불러오는 중...';
+  const r = await API({ action: 'macro_data' }).catch((e) => ({ error: String(e) }));
+  box.textContent = '';
+  box.append(mk('h3', { textContent: '매크로' }));
+  if (r.error) { box.append(mk('div', { className: 'empty', textContent: r.error })); return; }
+  const list = (r.data && r.data.macros) || [];
+  if (!list.length) box.append(mk('div', { className: 'empty', textContent: '저장된 매크로가 없습니다. Claude에게 "이 작업을 매크로로 저장해 줘"라고 하면 여기에 나타납니다.' }));
+  list.forEach((m) => {
+    const inputs = {};
+    const card = mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: m.name + ' (' + m.steps + '단계)' }));
+    if (m.note) card.append(mk('div', { className: 'ds', textContent: m.note }));
+    card.append(mk('div', { className: 'ds', textContent: m.desc }));
+    if (m.vars.length) {
+      const row = mk('div', { className: 'row' });
+      m.vars.forEach((v) => { inputs[v] = mk('input', { placeholder: v, autocapitalize: 'off' }); row.append(inputs[v]); });
+      card.append(row);
+    }
+    const out = mk('div', { className: 'ds' });
+    const run = mk('button', { textContent: '▶ 실행' });
+    run.onclick = async () => {
+      const vars = {}; for (const k of Object.keys(inputs)) vars[k] = inputs[k].value;
+      run.disabled = true; out.textContent = '실행 중...';
+      const rr = await API({ action: 'macro_run', name: m.name, vars }).catch((e) => ({ error: String(e) }));
+      run.disabled = false; out.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 400);
+    };
+    const del = mk('button', { className: 'del', textContent: '삭제' });
+    del.onclick = async () => { if (!confirm('"' + m.name + '" 매크로를 삭제할까요?')) return; await API({ action: 'macro_delete', name: m.name }); loadMacros(); };
+    card.append(mk('div', { className: 'row' }, run, del), out);
+    box.append(card);
+  });
+}
+async function loadExts() {
+  const box = els.ext; box.textContent = '불러오는 중...';
+  const r = await API({ action: 'ext_data' }).catch((e) => ({ error: String(e) }));
+  box.textContent = '';
+  box.append(mk('h3', { textContent: '익스텐션 (확장 프로그램)' }));
+  const src = mk('input', { className: 'add', placeholder: '확장 ID, 웹스토어 주소, GitHub 주소, zip 주소', autocapitalize: 'off', autocomplete: 'off' });
+  const addBtn = mk('button', { textContent: '추가' });
+  const st = mk('div', { className: 'ds' });
+  addBtn.onclick = async () => {
+    if (!src.value.trim()) return;
+    addBtn.disabled = true; st.textContent = '설치 중... (크롬이 잠깐 다시 시작됩니다)';
+    const rr = await API({ action: 'ext_add', source: src.value.trim() }).catch((e) => ({ error: String(e) }));
+    addBtn.disabled = false; st.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 300);
+    if (!rr.error) loadExts();
+  };
+  box.append(mk('div', { className: 'card' }, mk('div', { className: 'row' }, src, addBtn), st));
+  if (r.error) { box.append(mk('div', { className: 'empty', textContent: r.error })); return; }
+  const list = (r.data && r.data.exts) || [];
+  if (!list.length) box.append(mk('div', { className: 'empty', textContent: '설치된 확장 프로그램이 없습니다.' }));
+  list.forEach((e) => {
+    const card = mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: e.name + ' v' + e.version }), mk('div', { className: 'ds', textContent: e.running ? '실행 중' : '대기' }));
+    const row = mk('div', { className: 'row' });
+    const open = (page) => async () => { await API({ action: 'ext_open', name: e.slug, page }); showView('browser'); send({ t: 'tabs' }); };
+    if (e.popup) row.append(mk('button', { textContent: '열기', onclick: open('popup') }));
+    if (e.options) row.append(mk('button', { textContent: '설정', onclick: open('options') }));
+    row.append(mk('button', { className: 'del', textContent: '삭제', onclick: async () => { if (!confirm('"' + e.name + '" 을(를) 삭제할까요? 크롬이 다시 시작됩니다.')) return; await API({ action: 'ext_remove', name: e.slug }); loadExts(); } }));
+    card.append(row);
+    box.append(card);
+  });
+}
 const go = () => {
   const u = document.getElementById('url');
   let v = u.value.trim();
