@@ -100,10 +100,20 @@ c.addEventListener('click', (e) => {
   txt.focus({ preventScroll: true }); // phone keyboard pops up right after tapping a field on the screen
 });
 // Whatever is typed or pasted goes straight to Chrome (works for passwords too), then the box is cleared.
-const flush = () => { if (txt.value) send({ t: 'text', v: txt.value }); txt.value = ''; };
+// The box always holds one invisible marker character, so the phone keyboard's delete key has something
+// to delete: when the marker disappears we know Backspace was pressed (and send it to Chrome).
+const MARK = '​';
+const reset = () => { txt.value = MARK; };
+const flush = () => {
+  const v = txt.value.split(MARK).join('');
+  if (v) send({ t: 'text', v });
+  reset();
+};
+reset();
+txt.addEventListener('focus', () => { if (!txt.value) reset(); });
 txt.addEventListener('input', (e) => {
   if (e.isComposing) return; // wait for Korean/IME composition to finish
-  if (e.inputType && e.inputType.startsWith('delete') && !txt.value) { send({ t: 'key', k: 'Backspace' }); return; }
+  if (!txt.value.includes(MARK)) { send({ t: 'key', k: 'Backspace' }); reset(); return; }
   flush();
 });
 txt.addEventListener('compositionend', flush);
