@@ -13,6 +13,9 @@ const PORT = Number(process.env.PORT) || 3000;
 const TOKEN = fs.readFileSync(path.join(ROOT, 'token.txt'), 'utf8').trim();
 const PROFILE = path.join(ROOT, 'profile');
 const VIEW = { width: 1100, height: 720 };
+// Size of every tab, in CSS pixels, plus the pixel density. The phone reports its own size (see 'viewport' below).
+let VIEWSPEC = { w: VIEW.width, h: VIEW.height, dpr: 1 };
+const viewSessions = new Map(); // page -> CDP session that holds the size override (it must stay open to keep it)
 
 if (TOKEN.length < 24) { console.error('token too short'); process.exit(1); }
 
@@ -48,16 +51,52 @@ async function loadCookies() {
   } catch {}
 }
 
+async function applyView(p) {
+  try {
+    let sess = viewSessions.get(p);
+    if (!sess) { sess = await ctx.newCDPSession(p); viewSessions.set(p, sess); p.on('close', () => viewSessions.delete(p)); }
+    await sess.send('Emulation.setDeviceMetricsOverride', { width: VIEWSPEC.w, height: VIEWSPEC.h, deviceScaleFactor: VIEWSPEC.dpr, mobile: false });
+  } catch {}
+}
+
+// Set the size, then check the page really got it; if not, start over with a fresh connection (a silent failure left
+// Chrome at its default size and 1x density, so the picture was wrong and taps missed).
+// All size changes run one after another and each reads the NEWEST size when it runs; two overlapping runs used to
+// finish in the wrong order and leave an old size on the page.
+let viewLock = Promise.resolve();
+function ensureView(p, tries = 4) {
+  const run = viewLock.then(() => ensureViewNow(p, tries));
+  viewLock = run.catch(() => {});
+  return run;
+}
+const viewMatches = (p) => p.evaluate(([w, h, d]) => innerWidth === w && innerHeight === h && Math.abs(devicePixelRatio - d) < 0.05, [VIEWSPEC.w, VIEWSPEC.h, VIEWSPEC.dpr]).catch(() => false);
+async function ensureViewNow(p, tries) {
+  for (let i = 0; i < tries; i++) {
+    if (p.isClosed()) return false; // a closed page must not hold up the queue for the pages that matter
+    if (await viewMatches(p)) return true; // already right: sending it again would only make the page re-layout
+    await applyView(p);
+    if (await viewMatches(p)) return true;
+    const old = viewSessions.get(p);
+    viewSessions.delete(p);
+    if (old) old.detach().catch(() => {});
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  console.error('could not apply the page size', JSON.stringify(VIEWSPEC));
+  return false;
+}
+
 async function ensure() {
   if (ctx && page && !page.isClosed()) return page;
   if (!ctx) {
     ctx = await pw.chromium.launchPersistentContext(PROFILE, {
       headless: true,
-      viewport: VIEW,
+      viewport: null, // the size is set by applyView() below
       locale: 'ko-KR',
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     });
     ctx.on('page', (p) => {
+      ensureView(p);
+      p.on('domcontentloaded', () => ensureView(p, 2)); // a new page load must keep the size
       page = p;
       pageListeners.forEach((f) => f(p));
       // when the current tab is closed, fall back to the last remaining tab
@@ -68,7 +107,8 @@ async function ensure() {
         if (page) pageListeners.forEach((f) => f(page));
       });
     });
-    ctx.on('close', () => { ctx = null; page = null; clearInterval(cookieTimer); });
+    ctx.on('close', () => { ctx = null; page = null; clearInterval(cookieTimer); viewSessions.clear(); });
+    for (const pg of ctx.pages()) { ensureView(pg); pg.on('domcontentloaded', () => ensureView(pg, 2)); }
     await loadCookies();
     cookieTimer = setInterval(saveCookies, 20000);
   }
@@ -366,17 +406,38 @@ wss.on('connection', async (ws) => {
   let cdp = null;
   let cur = null;
   const stopCast = async () => { try { if (cdp) { await cdp.send('Page.stopScreencast').catch(() => {}); await cdp.detach().catch(() => {}); } } catch {} cdp = null; };
+  // One capture at a time; if the screen changes meanwhile, capture again right after. The next capture starts only
+  // when the previous picture has been written to the network, so slow connections never pile up old pictures.
+  let busy = false, dirty = false, viewTimer = null;
+  const pump = async () => {
+    if (busy) { dirty = true; return; }
+    busy = true;
+    try {
+      do {
+        dirty = false;
+        if (!cdp || ws.readyState !== 1) break;
+        // capture through the same connection that holds the size/density setting, otherwise it comes out 1x
+        const shooter = (cur && viewSessions.get(cur)) || cdp;
+        const r = await shooter.send('Page.captureScreenshot', { format: 'jpeg', quality: 55, fromSurface: true });
+        if (ws.readyState === 1) await new Promise((res) => ws.send(Buffer.from(r.data, 'base64'), res));
+      } while (dirty);
+    } catch {}
+    busy = false;
+    // a capture that failed because the size changed meanwhile must not leave the old picture on the phone
+    if (dirty) { dirty = false; pump(); }
+  };
   const startCast = async () => {
     await stopCast();
     cur = await ensure();
     cdp = await ctx.newCDPSession(cur);
+    // Chrome's screencast frames are always page-sized (never sharper on a phone), so they are used only as the
+    // signal "the screen changed". The picture sent to the phone is a real capture at full pixel density.
     cdp.on('Page.screencastFrame', (f) => {
-      const ack = () => { cdp && cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {}); };
-      // Ack only after the frame is actually written to the network: Chrome then sends the newest picture at the
-      // network's pace instead of piling up old frames (that backlog made typed letters appear late).
-      if (ws.readyState === 1) ws.send(Buffer.from(f.data, 'base64'), ack); else ack();
+      cdp && cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
+      pump();
     });
-    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 55, maxWidth: VIEW.width, maxHeight: VIEW.height, everyNthFrame: 1 });
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 20, maxWidth: 120, maxHeight: 120, everyNthFrame: 1 });
+    pump();
   };
   const onPage = () => { startCast().catch(() => {}); };
   pageListeners.add(onPage);
@@ -409,6 +470,25 @@ wss.on('connection', async (ws) => {
         await p.mouse.wheel(Number(d.dx) || 0, d.dy === undefined ? 300 : Number(d.dy) || 0);
       }
       else if (d.t === 'goto' && /^https?:\/\//i.test(String(d.u))) await p.goto(String(d.u), { waitUntil: 'domcontentloaded', timeout: 30000 });
+      else if (d.t === 'viewport') {
+        // the phone tells its screen size: make every tab exactly that big, then restart the picture at the new size
+        const cl = (v, a, b) => Math.min(b, Math.max(a, v));
+        VIEWSPEC = { w: cl(Math.round(Number(d.w)) || VIEW.width, 200, 2000), h: cl(Math.round(Number(d.h)) || VIEW.height, 200, 3000), dpr: cl(Number(d.dpr) || 1, 1, 3) };
+        // Requests that arrive close together (the screen size can settle in two steps) are merged: only the last one is applied.
+        clearTimeout(viewTimer);
+        viewTimer = setTimeout(async () => {
+          try {
+            for (const pg of livePages()) await ensureView(pg);
+            await startCast();
+            // the page needs a moment to lay out at the new size: capture again so the phone never keeps the old-size picture
+            setTimeout(pump, 250); setTimeout(pump, 800);
+            // Chrome sometimes drops a resize that arrives right after another one: look again and fix it if so
+            for (const delay of [700, 1600]) setTimeout(async () => { try { for (const pg of livePages()) await ensureView(pg, 2); pump(); } catch {} }, delay);
+          } catch {}
+        }, 250);
+      }
+      else if (d.t === 'back') await p.goBack({ timeout: 8000 }).catch(() => {});
+      else if (d.t === 'reload') await p.reload({ timeout: 15000 }).catch(() => {});
       else if (d.t === 'tab') await switchTab(d.n);
       else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');
       else if (d.t === 'closetab') await closeTab(d.n);

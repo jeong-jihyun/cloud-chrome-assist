@@ -7,7 +7,7 @@
 <style>
   body{margin:0;background:#111;color:#eee;font:14px system-ui,sans-serif}
   button{padding:8px 10px;border-radius:6px;border:0;background:#3b6ef5;color:#fff;font-size:14px}
-  #tabs{display:flex;gap:4px;overflow-x:auto;padding:6px 8px 0;background:#181818;white-space:nowrap}
+  #tabs{min-height:38px;box-sizing:border-box;display:flex;gap:4px;overflow-x:auto;padding:6px 8px 0;background:#181818;white-space:nowrap}
   #tabs button{background:#333;max-width:140px;overflow:hidden;text-overflow:ellipsis;border-radius:6px 6px 0 0}
   #tabs button.on{background:#3b6ef5}
   #tabs button.x{background:#7a2b2b}
@@ -23,6 +23,8 @@
 <body>
 <div id="tabs"></div>
 <div id="urlbar">
+  <button id="back" aria-label="뒤로">◀</button>
+  <button id="reload" aria-label="새로고침">⟳</button>
   <input id="url" placeholder="주소 입력 (예: naver.com)" autocapitalize="off" autocomplete="off" inputmode="url">
   <button id="go">이동</button>
 </div>
@@ -34,7 +36,7 @@
 const q = new URLSearchParams(location.search);
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || '');
 const c = document.getElementById('c'), g = c.getContext('2d'), msg = document.getElementById('msg');
-let ws = null;
+let ws = null, fails = 0;
 let retry = null;
 // Reconnects by itself: the phone browser drops the connection when it goes to the background
 // (e.g. while you approve a login in KakaoTalk), so reconnect on close and when the page comes back.
@@ -44,8 +46,12 @@ function connect() {
   ws = new WebSocket(WS_URL);
   ws.binaryType = 'blob';
   ws.onmessage = onMsg;
-  ws.onopen = () => { msg.textContent = ''; send({ t: 'tabs' }); };
-  ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 자동으로 다시 연결합니다...'; clearTimeout(retry); retry = setTimeout(connect, 1500); };
+  ws.onopen = () => { fails = 0; msg.textContent = ''; send({ t: 'tabs' }); reportSize(true); };
+  ws.onclose = () => {
+    fails++;
+    msg.textContent = fails < 4 ? '연결이 끊겼습니다. 자동으로 다시 연결합니다...' : '크롬이 꺼졌거나 연결이 막혔습니다. Claude에게 "클라우드 크롬 켜줘"라고 하고 새 링크를 받으세요. (켜진 지 45분이 지나면 자동으로 꺼집니다)';
+    clearTimeout(retry); retry = setTimeout(connect, fails < 4 ? 1500 : 5000);
+  };
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) connect(); });
@@ -65,9 +71,28 @@ async function onMsg(e) {
   g.drawImage(bmp, 0, 0);
 }
 const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+// ---- browser size = this phone's screen ----
+// The remote Chrome gets exactly the width and height available here, and 1-2x pixel density so text stays sharp.
+// curDpr: how many picture pixels make one page pixel (needed to turn taps into page coordinates).
+let vw = 0, vh = 0, curDpr = 1, sizeTimer = null;
+function reportSize(force) {
+  const r = wrap.getBoundingClientRect();
+  const w = Math.round(wrap.clientWidth), h = Math.round(Math.max(280, innerHeight - r.top - 10));
+  if (!force && document.activeElement === txt && w === vw) return; // keyboard opening: leave the remote page alone
+  if (!force && w === vw && Math.abs(h - vh) < 4) return;
+  const dpr = Math.min(2, Math.max(1, Math.round((window.devicePixelRatio || 1) * 10) / 10));
+  vw = w; vh = h; curDpr = dpr;
+  send({ t: 'viewport', w, h, dpr });
+}
+const reportSoon = () => { clearTimeout(sizeTimer); sizeTimer = setTimeout(() => reportSize(false), 300); };
+window.addEventListener('resize', reportSoon);
+window.addEventListener('orientationchange', reportSoon);
 // ---- tabs: tap a tab to switch, + opens a new one, x closes the current one ----
 const tabsEl = document.getElementById('tabs');
 function renderTabs(list) {
+  const here = list.find((t) => t.active), urlBox = document.getElementById('url');
+  if (here && document.activeElement !== urlBox) urlBox.placeholder = (here.url || '').replace(/^https?:\/\//, '') || '주소 입력 (예: naver.com)';
   tabsEl.textContent = '';
   list.forEach((t) => {
     const b = document.createElement('button');
@@ -87,6 +112,7 @@ function renderTabs(list) {
     x.onclick = () => send({ t: 'closetab' });
     tabsEl.appendChild(x);
   }
+  reportSoon(); // the tab bar changes the height left for the picture: measure again
 }
 setInterval(() => { if (ws && ws.readyState === 1) send({ t: 'tabs' }); else connect(); }, 2500);
 connect();
@@ -99,6 +125,8 @@ const go = () => {
   u.value = '';
 };
 document.getElementById('go').onclick = go;
+document.getElementById('back').onclick = () => send({ t: 'back' });
+document.getElementById('reload').onclick = () => send({ t: 'reload' });
 document.getElementById('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
 
 const txt = document.getElementById('txt');
@@ -120,7 +148,7 @@ window.addEventListener('resize', applyView);
 
 function tapAt(x, y) {
   const r = c.getBoundingClientRect(); // already includes the zoom/pan transform
-  send({ t: 'click', x: (x - r.left) * c.width / r.width, y: (y - r.top) * c.height / r.height });
+  send({ t: 'click', x: (x - r.left) * (vw || c.width) / r.width, y: (y - r.top) * (vh || c.height) / r.height });
   // Phone keyboard pops up right after tapping a field on the screen. The hidden input is moved to the tapped spot
   // first, so the browser has nothing to scroll to (a box at the top of the page made the screen jump up).
   txt.style.left = Math.round(x) + 'px';
@@ -139,15 +167,31 @@ function flushScroll() {
   send({ t: 'scroll', x: scrollAcc.x, y: scrollAcc.y, dx, dy });
 }
 const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-let gest = null;
+let gest = null, lpTimer = null;
+// Press and hold on the picture to paste what you copied (the real input box is hidden, so there is no paste menu).
+async function pasteAt(x, y) {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { msg.textContent = '복사해 둔 내용이 없습니다.'; return; }
+    gest = { mode: 'none' };
+    tapAt(x, y); // focus the field under the finger first
+    setTimeout(() => send({ t: 'edit', del: 0, add: text }), 150);
+    if (navigator.vibrate) navigator.vibrate(30);
+    msg.textContent = '붙여넣었습니다.';
+    setTimeout(() => { if (msg.textContent === '붙여넣었습니다.') msg.textContent = ''; }, 1500);
+  } catch (e) { msg.textContent = '클립보드를 읽을 수 없습니다. 브라우저의 클립보드 접근을 허용해 주세요.'; }
+}
 wrap.addEventListener('touchstart', (e) => {
   if (e.touches.length === 2) {
     const [a, b] = e.touches;
+    clearTimeout(lpTimer);
     gest = { mode: 'pinch', d: dist(a, b), cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, S0: S, TX0: TX, TY0: TY };
     e.preventDefault();
   } else if (e.touches.length === 1) {
     const t = e.touches[0];
     gest = { mode: 'one', x: t.clientX, y: t.clientY, lx: t.clientX, ly: t.clientY, moved: false };
+    clearTimeout(lpTimer);
+    lpTimer = setTimeout(() => { if (gest && gest.mode === 'one' && !gest.moved) pasteAt(t.clientX, t.clientY); }, 650);
   }
 }, { passive: false });
 wrap.addEventListener('touchmove', (e) => {
@@ -163,9 +207,9 @@ wrap.addEventListener('touchmove', (e) => {
     S = S1; TX = mx - r.left - px * S1; TY = my - r.top - py * S1; applyView();
   } else if (gest.mode === 'one' && e.touches.length === 1) {
     const t = e.touches[0];
-    if (!gest.moved && Math.hypot(t.clientX - gest.x, t.clientY - gest.y) > 8) { gest.moved = true; gest.lx = gest.x; gest.ly = gest.y; }
+    if (!gest.moved && Math.hypot(t.clientX - gest.x, t.clientY - gest.y) > 8) { clearTimeout(lpTimer); gest.moved = true; gest.lx = gest.x; gest.ly = gest.y; }
     if (gest.moved) {
-      const r = c.getBoundingClientRect(), k = c.width / r.width; // screen px -> page px
+      const r = c.getBoundingClientRect(), k = (vw || c.width) / r.width; // screen px -> page px
       scrollAcc.dx -= (t.clientX - gest.lx) * k;
       scrollAcc.dy -= (t.clientY - gest.ly) * k;
       scrollAcc.x = (t.clientX - r.left) * k; scrollAcc.y = (t.clientY - r.top) * k;
@@ -175,6 +219,7 @@ wrap.addEventListener('touchmove', (e) => {
   }
 }, { passive: false });
 wrap.addEventListener('touchend', (e) => {
+  clearTimeout(lpTimer);
   if (gest && gest.mode === 'one' && !gest.moved && e.changedTouches.length === 1) {
     const t = e.changedTouches[0];
     e.preventDefault(); // stops the browser's own follow-up click, so a tap is sent once
@@ -184,7 +229,7 @@ wrap.addEventListener('touchend', (e) => {
   if (e.touches.length === 0) gest = null;
   else if (e.touches.length === 1) gest = { mode: 'none' }; // one finger left after a pinch: ignore it (no tap, no scroll)
 }, { passive: false });
-wrap.addEventListener('touchcancel', () => { gest = null; });
+wrap.addEventListener('touchcancel', () => { clearTimeout(lpTimer); gest = null; });
 
 // Typing: the box is only a buffer. After every change it is compared with what was sent last, and only the
 // difference (new letters, or Backspaces for deleted ones) goes to Chrome. The page never rewrites the box while
