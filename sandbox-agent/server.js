@@ -88,11 +88,14 @@ async function ensureViewNow(p, tries) {
 async function ensure() {
   if (ctx && page && !page.isClosed()) return page;
   if (!ctx) {
+    const exts = extFolders();
     ctx = await pw.chromium.launchPersistentContext(PROFILE, {
       headless: true,
+      // extensions only load in Chrome's new headless mode (channel 'chromium'), not in the default headless shell
+      ...(exts.length ? { channel: 'chromium' } : {}),
       viewport: null, // the size is set by applyView() below
       locale: 'ko-KR',
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-dev-shm-usage', ...(exts.length ? ['--disable-extensions-except=' + exts.join(','), '--load-extension=' + exts.join(',')] : [])],
     });
     ctx.on('page', (p) => {
       ensureView(p);
@@ -148,7 +151,7 @@ async function switchTab(n) {
 async function newTab(url) {
   if (url && !/^https?:\/\//i.test(url)) throw new Error('url must start with http:// or https://'); // check before opening a tab
   const np = await ctx.newPage(); // the 'page' event makes it the current tab
-  if (url) await np.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  if (url) { await np.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }); await ensureView(np, 2); }
   return np;
 }
 
@@ -214,6 +217,172 @@ function fieldLocator(p, f) {
   return p.getByPlaceholder(f).or(p.getByLabel(f)).or(p.locator(`[name="${q}"],[id="${q}"]`)).and(fields).first();
 }
 
+// ---- extensions: unpacked folders in ./extensions, loaded when Chrome starts ----
+// Sources: a Chrome Web Store id or address (the .crx is fetched from Google's update service and unpacked),
+// a GitHub repository address, or a .zip / .crx address. Chrome must be restarted to pick up a change.
+const EXT_DIR = path.join(ROOT, 'extensions');
+const MAX_EXT_BYTES = 120 * 1024 * 1024;
+
+const extFolders = () => {
+  try {
+    return fs.readdirSync(EXT_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && fs.existsSync(path.join(EXT_DIR, d.name, 'manifest.json')))
+      .map((d) => path.join(EXT_DIR, d.name));
+  } catch { return []; }
+};
+// Chrome derives an unpacked extension's id from its folder path: sha256, first 32 hex digits, 0-9a-f -> a-p.
+const extIdFor = (dir) => crypto.createHash('sha256').update(fs.realpathSync(dir)).digest('hex').slice(0, 32).replace(/[0-9a-f]/g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
+const readManifest = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8').replace(/^﻿/, ''));
+function extDisplayName(dir, m) {
+  let n = String(m.name || '');
+  const mm = n.match(/^__MSG_(.+)__$/);
+  if (mm) {
+    try {
+      const loc = m.default_locale || 'en';
+      const msgs = JSON.parse(fs.readFileSync(path.join(dir, '_locales', loc, 'messages.json'), 'utf8'));
+      const key = Object.keys(msgs).find((k) => k.toLowerCase() === mm[1].toLowerCase());
+      if (key) n = msgs[key].message;
+    } catch {}
+  }
+  return n && !n.startsWith('__MSG_') ? n : path.basename(dir);
+}
+const slugOf = (s) => {
+  const a = String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return a || 'ext-' + crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8); // names without latin letters (e.g. Korean)
+};
+
+function parseExtSource(src) {
+  const s = String(src || '').trim();
+  if (/^[a-p]{32}$/.test(s)) return { kind: 'store', id: s };
+  const st = s.match(/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)\/detail\/[^?#]*?([a-p]{32})(?:[/?#]|$)/);
+  if (st) return { kind: 'store', id: st[1] };
+  const gh = s.match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/tree\/([^/]+)(?:\/(.+?))?)?\/?$/);
+  if (gh) return { kind: 'github', owner: gh[1], repo: gh[2], branch: gh[3], sub: gh[4] };
+  if (/^https:\/\//i.test(s) || /^http:\/\/(localhost|127\.0\.0\.1)[:/]/i.test(s)) return { kind: 'url', url: s };
+  throw new Error('주소를 알 수 없습니다. 확장 ID(영소문자 32자), 크롬 웹스토어 주소, GitHub 저장소 주소, 또는 .zip/.crx 주소를 주세요.');
+}
+
+async function download(url) {
+  const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60000) });
+  if (!r.ok) throw new Error('내려받기 실패 (' + r.status + '): ' + url.slice(0, 120));
+  const len = Number(r.headers.get('content-length') || 0);
+  if (len > MAX_EXT_BYTES) throw new Error('파일이 너무 큽니다(최대 120MB).');
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length > MAX_EXT_BYTES) throw new Error('파일이 너무 큽니다(최대 120MB).');
+  return buf;
+}
+
+// .crx = a header followed by an ordinary zip: cut the header off.
+function zipFromBuffer(buf) {
+  if (buf.length > 12 && buf.toString('latin1', 0, 4) === 'Cr24') {
+    const ver = buf.readUInt32LE(4);
+    const start = ver === 3 ? 12 + buf.readUInt32LE(8) : 16 + buf.readUInt32LE(8) + buf.readUInt32LE(12);
+    return buf.subarray(start);
+  }
+  if (buf.length > 4 && buf.toString('latin1', 0, 2) === 'PK') return buf;
+  throw new Error('zip 또는 crx 파일이 아닙니다.');
+}
+
+function loadAdmZip() {
+  try { return require('adm-zip'); } catch {}
+  require('child_process').execFileSync('npm', ['install', '--no-audit', '--no-fund', 'adm-zip'], { cwd: ROOT, stdio: 'ignore', timeout: 120000 });
+  return require('adm-zip');
+}
+
+function unzipInto(zipBuf, dest) {
+  const AdmZip = loadAdmZip();
+  fs.mkdirSync(dest, { recursive: true });
+  const root = path.resolve(dest) + path.sep;
+  for (const e of new AdmZip(zipBuf).getEntries()) {
+    const out = path.resolve(dest, e.entryName);
+    if (!out.startsWith(root)) continue; // never write outside the folder ("../" in a file name)
+    if (e.isDirectory) fs.mkdirSync(out, { recursive: true });
+    else { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, e.getData()); }
+  }
+}
+
+// folders that contain a manifest.json (closest to the top first)
+function findManifestDirs(root, maxDepth = 4) {
+  const found = [];
+  const walk = (dir, depth) => {
+    if (fs.existsSync(path.join(dir, 'manifest.json'))) { found.push(dir); return; }
+    if (depth >= maxDepth) return;
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) if (d.isDirectory() && d.name !== 'node_modules' && !d.name.startsWith('.')) walk(path.join(dir, d.name), depth + 1);
+  };
+  walk(root, 0);
+  return found;
+}
+
+async function extAdd(body) {
+  const src = parseExtSource(body.source);
+  let buf, label, hintName;
+  if (src.kind === 'store') {
+    buf = await download('https://clients2.google.com/service/update2/crx?response=redirect&prodversion=130.0&acceptformat=crx2,crx3&x=id%3D' + src.id + '%26uc');
+    label = '크롬 웹스토어 ' + src.id; hintName = src.id;
+  } else if (src.kind === 'github') {
+    let lastErr;
+    for (const b of src.branch ? [src.branch] : ['main', 'master']) {
+      try { buf = await download('https://codeload.github.com/' + src.owner + '/' + src.repo + '/zip/refs/heads/' + b); label = 'GitHub ' + src.owner + '/' + src.repo + '@' + b; break; }
+      catch (e) { lastErr = e; }
+    }
+    if (!buf) throw new Error('GitHub에서 내려받지 못했습니다(비공개 저장소는 안 됩니다): ' + (lastErr && lastErr.message));
+    hintName = src.repo;
+  } else { buf = await download(src.url); label = src.url.slice(0, 80); hintName = path.basename(new URL(src.url).pathname).replace(/\.(zip|crx)$/i, ''); }
+
+  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ext-'));
+  try {
+    unzipInto(zipFromBuffer(buf), tmp);
+    const sub = body.path || src.sub;
+    let dirs;
+    if (sub) {
+      // the subfolder may sit at the top of the zip or inside the single top folder GitHub adds ("repo-main/")
+      const top = fs.readdirSync(tmp).filter((n) => fs.statSync(path.join(tmp, n)).isDirectory());
+      const base = [path.join(tmp, String(sub)), ...top.map((t) => path.join(tmp, t, String(sub)))].find((c) => c.startsWith(tmp + path.sep) && fs.existsSync(c));
+      dirs = base ? findManifestDirs(base).slice(0, 1) : [];
+    } else dirs = findManifestDirs(tmp);
+    if (!dirs.length) throw new Error('manifest.json을 찾지 못했습니다. 크롬 확장 프로그램 폴더가 맞는지 확인해 주세요.');
+    if (dirs.length > 1) throw new Error('확장 폴더가 여러 개 있습니다. path로 하나를 골라 주세요:\n' + dirs.map((d) => '  ' + path.relative(tmp, d).split(path.sep).slice(1).join('/')).join('\n'));
+    const m = readManifest(dirs[0]);
+    if (m.manifest_version === 2) throw new Error('구형(Manifest V2) 확장 프로그램이라 최신 크롬에서 로드되지 않습니다. V3로 만든 버전이 필요합니다. (' + (m.name || hintName) + ')');
+    const name = extDisplayName(dirs[0], m);
+    const slug = slugOf(name === path.basename(dirs[0]) ? hintName : name);
+    const dest = path.join(EXT_DIR, slug);
+    fs.mkdirSync(EXT_DIR, { recursive: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(dirs[0], dest, { recursive: true });
+    const perms = [...(m.permissions || []), ...(m.host_permissions || [])];
+    const id = extIdFor(dest);
+    const restarted = await restartForExtensions(body.restart !== false);
+    return { text: '확장 프로그램 "' + name + '" v' + (m.version || '?') + ' 장착했습니다.\n- 출처: ' + label + '\n- 폴더 이름: ' + slug + '\n- 확장 ID: ' + id + (src.kind === 'store' ? ' (압축을 푼 폴더로 장착해서 스토어의 원래 ID와는 다릅니다)' : '') + '\n- 요구하는 권한: ' + (perms.length ? perms.slice(0, 12).join(', ') + (perms.length > 12 ? ' 외 ' + (perms.length - 12) + '개' : '') : '없음') + '\n- ' + restarted };
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+
+// Extensions are read when Chrome starts: close it (logins are saved first); it starts again with the next command.
+async function restartForExtensions(doIt) {
+  if (!doIt) return '크롬을 다시 시작해야 적용됩니다(browser_stop 후 다시 열기).';
+  if (!ctx) return '다음에 크롬이 켜질 때 적용됩니다.';
+  await saveCookies();
+  await ctx.close().catch(() => {});
+  ctx = null; page = null;
+  return '크롬을 다시 시작했습니다(열려 있던 탭은 닫혔고 로그인은 유지됩니다). 다음 명령부터 적용됩니다.';
+}
+
+function extList() {
+  const running = new Set((ctx ? ctx.serviceWorkers() : []).map((w) => { try { return new URL(w.url()).host; } catch { return ''; } }));
+  return extFolders().map((dir) => {
+    const m = readManifest(dir);
+    const popup = (m.action && m.action.default_popup) || (m.browser_action && m.browser_action.default_popup) || '';
+    const options = (m.options_ui && m.options_ui.page) || m.options_page || '';
+    return { dir, slug: path.basename(dir), name: extDisplayName(dir, m), version: m.version, mv: m.manifest_version, id: extIdFor(dir), popup, options, running: running.has(extIdFor(dir)) };
+  });
+}
+const findExt = (key) => {
+  const k = String(key || '').trim().toLowerCase();
+  const hit = extList().find((e) => e.slug === k || e.name.toLowerCase() === k || e.id === k || e.slug === slugOf(k));
+  if (!hit) throw new Error('"' + key + '" 확장 프로그램이 없습니다. 목록: ' + (extList().map((e) => e.slug).join(', ') || '(없음)'));
+  return hit;
+};
+
 // ---- macros: named lists of steps saved by Claude and replayed by name ----
 const MACRO_FILE = path.join(ROOT, 'macros.json');
 const MACRO_ACTIONS = ['navigate', 'click', 'type', 'key', 'scroll', 'back', 'wait', 'tab_new', 'tab_switch', 'tab_close'];
@@ -277,6 +446,16 @@ async function act(body) {
     ctx = null; page = null;
     return { text: 'browser closed (profile and logins kept)' };
   }
+  if (a === 'ext_add') return extAdd(body);
+  if (a === 'ext_list') {
+    const list = extList();
+    return { text: list.length ? list.map((e) => '- ' + e.name + ' v' + e.version + ' (폴더 ' + e.slug + ', MV' + e.mv + ', ID ' + e.id + (e.running ? ', 실행 중' : '') + ')' + (e.popup ? '\n    팝업: ' + e.popup : '') + (e.options ? '\n    설정: ' + e.options : '')).join('\n') : '장착된 확장 프로그램이 없습니다.' };
+  }
+  if (a === 'ext_remove') {
+    const e = findExt(body.name);
+    fs.rmSync(e.dir, { recursive: true, force: true });
+    return { text: '확장 프로그램 "' + e.name + '" 삭제했습니다. ' + (await restartForExtensions(body.restart !== false)) };
+  }
   if (a === 'macro_list') {
     const all = readMacros();
     const names = Object.keys(all);
@@ -310,6 +489,16 @@ async function act(body) {
   }
   if (a === 'macro_run') return runMacro(body);
   if (a === 'wait') { await new Promise((r) => setTimeout(r, Math.min(Number(body.ms) || 1000, 10000))); return { text: 'waited' }; }
+  if (a === 'ext_open') {
+    const e = findExt(body.name);
+    const which = body.page === 'options' ? e.options : e.popup;
+    if (!which) throw new Error('이 확장 프로그램에는 ' + (body.page === 'options' ? '설정' : '팝업') + ' 화면이 없습니다.');
+    await ensure();
+    const np = await newTab('');
+    await np.goto('chrome-extension://' + e.id + '/' + which.replace(/^\//, ''), { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await settle(np);
+    return { text: tabText(await tabList()) + '\n\n' + (await snapshot(np)) };
+  }
   const p = await ensure();
   if (a === 'tabs') return { text: tabText(await tabList()) };
   if (a === 'tab_new') {
@@ -330,6 +519,7 @@ async function act(body) {
     const u = String(body.url || '');
     if (!/^https?:\/\//i.test(u)) throw new Error('url must start with http:// or https://');
     await p.goto(u, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await ensureView(p, 2); // let the page reach its final size before anything is clicked
     await settle(p);
     return { text: await snapshot(p) };
   }
@@ -492,7 +682,7 @@ wss.on('connection', async (ws) => {
       else if (d.t === 'tab') await switchTab(d.n);
       else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');
       else if (d.t === 'closetab') await closeTab(d.n);
-      if (['tabs', 'tab', 'newtab', 'closetab', 'goto'].includes(d.t)) reply({ tabs: await tabList() });
+      if (['tabs', 'tab', 'newtab', 'closetab', 'goto', 'back', 'reload'].includes(d.t)) reply({ tabs: await tabList() });
     } catch (e) { reply({ error: String(e.message || e).slice(0, 200) }); }
   };
   try { await startCast(); } catch (e) { reply({ error: String(e.message || e) }); }

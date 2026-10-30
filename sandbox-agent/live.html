@@ -114,7 +114,8 @@ function renderTabs(list) {
   }
   reportSoon(); // the tab bar changes the height left for the picture: measure again
 }
-setInterval(() => { if (ws && ws.readyState === 1) send({ t: 'tabs' }); else connect(); }, 2500);
+setInterval(() => { if (ws && ws.readyState === 1) send({ t: 'tabs' }); else connect(); }, 1500);
+const refreshSoon = () => { setTimeout(() => send({ t: 'tabs' }), 600); setTimeout(() => send({ t: 'tabs' }), 1800); }; // address/title right after a page change
 connect();
 const go = () => {
   const u = document.getElementById('url');
@@ -123,10 +124,11 @@ const go = () => {
   if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
   send({ t: 'goto', u: v });
   u.value = '';
+  refreshSoon();
 };
 document.getElementById('go').onclick = go;
-document.getElementById('back').onclick = () => send({ t: 'back' });
-document.getElementById('reload').onclick = () => send({ t: 'reload' });
+document.getElementById('back').onclick = () => { send({ t: 'back' }); refreshSoon(); };
+document.getElementById('reload').onclick = () => { send({ t: 'reload' }); refreshSoon(); };
 document.getElementById('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
 
 const txt = document.getElementById('txt');
