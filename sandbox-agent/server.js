@@ -71,16 +71,16 @@ function ensureView(p, tries = 4) {
   return run;
 }
 const viewMatches = (p) => p.evaluate(([w, h, d]) => innerWidth === w && innerHeight === h && Math.abs(devicePixelRatio - d) < 0.05, [VIEWSPEC.w, VIEWSPEC.h, VIEWSPEC.dpr]).catch(() => false);
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 async function ensureViewNow(p, tries) {
   for (let i = 0; i < tries; i++) {
     if (p.isClosed()) return false; // a closed page must not hold up the queue for the pages that matter
     if (await viewMatches(p)) return true; // already right: sending it again would only make the page re-layout
-    await applyView(p);
-    if (await viewMatches(p)) return true;
-    const old = viewSessions.get(p);
-    viewSessions.delete(p);
-    if (old) old.detach().catch(() => {});
-    await new Promise((r) => setTimeout(r, 250));
+    try { await applyView(p); }
+    catch { viewSessions.delete(p); } // the connection is dead: the next round makes a new one (never detach a working one:
+                                      // detaching it wiped the size just applied, which left Chrome at its default size)
+    // a slow machine needs a moment before the page reports the new size: wait for it instead of calling it a failure
+    for (let k = 0; k < 15; k++) { if (await viewMatches(p)) return true; await sleepMs(100); }
   }
   console.error('could not apply the page size', JSON.stringify(VIEWSPEC));
   return false;
@@ -602,6 +602,17 @@ const server = http.createServer(async (req, res) => {
     if (!okToken(url.searchParams.get('token'))) return send(401, 'unauthorized', 'text/plain');
     return send(200, LIVE_HTML, 'text/html; charset=utf-8');
   }
+  if (url.pathname === '/shot') {
+    // One picture of what Chrome shows right now, at the phone's size: open it in any browser to see the real screen.
+    if (!okToken(url.searchParams.get('token'))) return send(401, 'unauthorized', 'text/plain');
+    try {
+      const p = await ensure();
+      await ensureView(p, 2);
+      const r = await viewSessions.get(p).send('Page.captureScreenshot', { format: 'jpeg', quality: 72, fromSurface: true });
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
+      return res.end(Buffer.from(r.data, 'base64'));
+    } catch (e) { return send(500, String(e.message || e).slice(0, 300), 'text/plain'); }
+  }
   if (url.pathname === '/api' && req.method === 'POST') {
     if (!okToken(req.headers['x-token'])) return send(401, { error: 'unauthorized' });
     let raw = '';
@@ -619,13 +630,23 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws));
 });
 
+function jpegWidth(b) { // width of a JPEG from its header (0 if unreadable)
+  for (let i = 2; i < b.length - 9;) {
+    if (b[i] !== 0xFF) { i++; continue; }
+    const m = b[i + 1];
+    if (m >= 0xC0 && m <= 0xC3) return b.readUInt16BE(i + 7);
+    i += 2 + b.readUInt16BE(i + 2);
+  }
+  return 0;
+}
+
 wss.on('connection', async (ws) => {
   let cdp = null;
   let cur = null;
   const stopCast = async () => { try { if (cdp) { await cdp.send('Page.stopScreencast').catch(() => {}); await cdp.detach().catch(() => {}); } } catch {} cdp = null; };
   // One capture at a time; if the screen changes meanwhile, capture again right after. The next capture starts only
   // when the previous picture has been written to the network, so slow connections never pile up old pictures.
-  let busy = false, dirty = false, viewTimer = null;
+  let busy = false, dirty = false, viewTimer = null, healing = false;
   const pump = async () => {
     if (busy) { dirty = true; return; }
     busy = true;
@@ -636,7 +657,16 @@ wss.on('connection', async (ws) => {
         // capture through the same connection that holds the size/density setting, otherwise it comes out 1x
         const shooter = (cur && viewSessions.get(cur)) || cdp;
         const r = await shooter.send('Page.captureScreenshot', { format: 'jpeg', quality: 55, fromSurface: true });
-        if (ws.readyState === 1) await new Promise((res) => ws.send(Buffer.from(r.data, 'base64'), res));
+        const buf = Buffer.from(r.data, 'base64');
+        if (ws.readyState === 1) await new Promise((res) => ws.send(buf, res));
+        // self-check: if the picture is not the size the phone asked for (Chrome sometimes drops the size setting
+        // after a restart), rebuild the size connection from scratch and capture again
+        const jw = jpegWidth(buf), want = Math.round(VIEWSPEC.w * VIEWSPEC.dpr);
+        if (jw && cur && Math.abs(jw - want) > 1 && VIEWSPEC.w !== VIEW.width && !healing) {
+          healing = true;
+          try { viewSessions.delete(cur); await ensureView(cur, 3); } catch {}
+          healing = false; dirty = true;
+        }
       } while (dirty);
     } catch {}
     busy = false;
