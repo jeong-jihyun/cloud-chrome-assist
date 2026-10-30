@@ -14,6 +14,10 @@ const TOOLS = [
   { name: 'browser_scroll', description: '아래(+)/위(-)로 스크롤한다.', inputSchema: obj({ dy: { type: 'number' } }) },
   { name: 'browser_back', description: '뒤로 가기.', inputSchema: obj() },
   { name: 'browser_screenshot', description: '현재 화면을 이미지로 돌려준다.', inputSchema: obj() },
+  { name: 'browser_tabs', description: '열려 있는 탭 목록(번호·제목·주소)을 보여준다. *가 붙은 것이 현재 탭이다.', inputSchema: obj() },
+  { name: 'browser_tab_new', description: '새 탭을 열고 그 탭으로 이동한다. url을 주면 그 주소를 연다.', inputSchema: obj({ url: { type: 'string' } }) },
+  { name: 'browser_tab_switch', description: '탭 번호(n)로 그 탭으로 이동하고 화면 요소 목록을 돌려준다. 이후 클릭·입력은 이 탭에서 이루어진다.', inputSchema: obj({ n: { type: 'number' } }, ['n']) },
+  { name: 'browser_tab_close', description: '탭 번호(n)의 탭을 닫는다. n을 생략하면 현재 탭을 닫는다.', inputSchema: obj({ n: { type: 'number' } }) },
   { name: 'browser_live_view', description: '사용자가 폰에서 직접 로그인할 수 있는 라이브 화면 링크를 돌려준다. 비밀번호/2단계 인증/캡처는 이걸로 사용자가 직접 한다.', inputSchema: obj() },
   { name: 'browser_stop', description: '크롬과 샌드박스를 끈다(로그인 정보는 저장됨). 작업이 끝나면 호출해 한도를 아낀다.', inputSchema: obj() },
 ];
@@ -21,6 +25,10 @@ const TOOLS = [
 const ACTION = {
   browser_open: (a) => ({ action: 'navigate', url: a.url }),
   browser_snapshot: () => ({ action: 'snapshot' }),
+  browser_tabs: () => ({ action: 'tabs' }),
+  browser_tab_new: (a) => ({ action: 'tab_new', url: a.url }),
+  browser_tab_switch: (a) => ({ action: 'tab_switch', n: a.n }),
+  browser_tab_close: (a) => ({ action: 'tab_close', n: a.n }),
   browser_click: (a) => ({ action: 'click', id: a.id, text: a.text }),
   browser_type: (a) => ({ action: 'type', id: a.id, text: a.text, submit: !!a.submit }),
   browser_key: (a) => ({ action: 'key', key: a.key }),
@@ -66,7 +74,7 @@ export default async function handler(req, res) {
       return reply({
         protocolVersion: msg.params?.protocolVersion || '2025-03-26',
         capabilities: { tools: {} },
-        serverInfo: { name: 'cloud-chrome-assist', version: '0.1.0' },
+        serverInfo: { name: 'cloud-chrome-assist', version: '0.2.0' },
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':

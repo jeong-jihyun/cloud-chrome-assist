@@ -35,12 +35,65 @@ async function ensure() {
       locale: 'ko-KR',
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     });
-    ctx.on('page', (p) => { page = p; pageListeners.forEach((f) => f(p)); });
+    ctx.on('page', (p) => {
+      page = p;
+      pageListeners.forEach((f) => f(p));
+      // when the current tab is closed, fall back to the last remaining tab
+      p.on('close', () => {
+        if (page !== p) return;
+        const ps = livePages();
+        page = ps[ps.length - 1] || null;
+        if (page) pageListeners.forEach((f) => f(page));
+      });
+    });
     ctx.on('close', () => { ctx = null; page = null; });
   }
   const pages = ctx.pages();
   page = pages[pages.length - 1] || (await ctx.newPage());
   return page;
+}
+
+const livePages = () => (ctx ? ctx.pages().filter((x) => !x.isClosed()) : []);
+
+// Numbered (1-based) list of open tabs; the current tab is marked active.
+async function tabList() {
+  const ps = livePages();
+  const out = [];
+  for (let i = 0; i < ps.length; i++) {
+    out.push({
+      n: i + 1,
+      title: String(await ps[i].title().catch(() => '')).slice(0, 40),
+      url: ps[i].url().slice(0, 100),
+      active: ps[i] === page,
+    });
+  }
+  return out;
+}
+const tabText = (l) => l.map((t) => `${t.active ? '*' : ' '} [${t.n}] ${t.title || '(제목 없음)'} - ${t.url}`).join('\n') || '(탭 없음)';
+
+async function switchTab(n) {
+  const ps = livePages();
+  const target = ps[Number(n) - 1];
+  if (!target) throw new Error('그런 탭이 없습니다. 탭 번호: 1~' + ps.length);
+  page = target;
+  await target.bringToFront().catch(() => {});
+  pageListeners.forEach((f) => f(target));
+  return target;
+}
+
+async function newTab(url) {
+  if (url && !/^https?:\/\//i.test(url)) throw new Error('url must start with http:// or https://'); // check before opening a tab
+  const np = await ctx.newPage(); // the 'page' event makes it the current tab
+  if (url) await np.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  return np;
+}
+
+async function closeTab(n) {
+  const ps = livePages();
+  const target = n ? ps[Number(n) - 1] : page;
+  if (!target) throw new Error('그런 탭이 없습니다. 탭 번호: 1~' + ps.length);
+  await target.close();
+  if (!livePages().length) await ensure(); // always keep at least one tab
 }
 
 const SNAP_FN = () => {
@@ -102,6 +155,21 @@ async function act(body) {
     return { text: 'browser closed (profile kept)' };
   }
   const p = await ensure();
+  if (a === 'tabs') return { text: tabText(await tabList()) };
+  if (a === 'tab_new') {
+    const np = await newTab(String(body.url || ''));
+    await settle(np);
+    return { text: tabText(await tabList()) + '\n\n' + (await snapshot(np)) };
+  }
+  if (a === 'tab_switch') {
+    const t = await switchTab(body.n);
+    return { text: tabText(await tabList()) + '\n\n' + (await snapshot(t)) };
+  }
+  if (a === 'tab_close') {
+    await closeTab(body.n);
+    const cur = await ensure();
+    return { text: tabText(await tabList()) + '\n\n' + (await snapshot(cur)) };
+  }
   if (a === 'navigate') {
     const u = String(body.url || '');
     if (!/^https?:\/\//i.test(u)) throw new Error('url must start with http:// or https://');
@@ -202,6 +270,10 @@ wss.on('connection', async (ws) => {
       else if (d.t === 'key') await p.keyboard.press(String(d.k));
       else if (d.t === 'scroll') await p.mouse.wheel(0, Number(d.dy) || 300);
       else if (d.t === 'goto' && /^https?:\/\//i.test(String(d.u))) await p.goto(String(d.u), { waitUntil: 'domcontentloaded', timeout: 30000 });
+      else if (d.t === 'tab') await switchTab(d.n);
+      else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');
+      else if (d.t === 'closetab') await closeTab(d.n);
+      if (['tabs', 'tab', 'newtab', 'closetab', 'goto'].includes(d.t)) ws.send(JSON.stringify({ tabs: await tabList() }));
     } catch (e) { ws.send(JSON.stringify({ error: String(e.message || e).slice(0, 200) })); }
   });
   ws.on('close', () => { pageListeners.delete(onPage); stopCast(); });

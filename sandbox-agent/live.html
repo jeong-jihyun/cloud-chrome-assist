@@ -10,12 +10,23 @@
   #bar input{flex:1;min-width:140px;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   button{padding:8px 10px;border-radius:6px;border:0;background:#3b6ef5;color:#fff;font-size:14px}
   button.s{background:#444}
+  #tabs{display:flex;gap:4px;overflow-x:auto;padding:6px 8px 0;background:#181818;white-space:nowrap}
+  #tabs button{background:#333;max-width:140px;overflow:hidden;text-overflow:ellipsis;border-radius:6px 6px 0 0}
+  #tabs button.on{background:#3b6ef5}
+  #tabs button.x{background:#7a2b2b}
+  #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
+  #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #wrap{padding:4px}
   canvas{width:100%;height:auto;background:#000;touch-action:manipulation;display:block}
   #msg{padding:4px 8px;color:#fc6;min-height:18px}
 </style>
 </head>
 <body>
+<div id="tabs"></div>
+<div id="urlbar">
+  <input id="url" placeholder="주소 입력 (예: naver.com)" autocapitalize="off" autocomplete="off" inputmode="url">
+  <button id="go">이동</button>
+</div>
 <div id="bar">
   <input id="txt" placeholder="여기에 치거나 붙여넣기 (비밀번호도 바로 들어감)" autocomplete="off" autocapitalize="off">
   <button id="send">입력</button>
@@ -33,13 +44,55 @@ const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') +
 ws.binaryType = 'blob';
 const c = document.getElementById('c'), g = c.getContext('2d'), msg = document.getElementById('msg');
 ws.onmessage = async (e) => {
-  if (typeof e.data === 'string') { try { msg.textContent = JSON.parse(e.data).error || ''; } catch {} return; }
+  if (typeof e.data === 'string') {
+    try {
+      const j = JSON.parse(e.data);
+      if (j.tabs) renderTabs(j.tabs);
+      if (j.error) msg.textContent = j.error;
+    } catch {}
+    return;
+  }
   const bmp = await createImageBitmap(e.data);
   if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height; }
   g.drawImage(bmp, 0, 0);
 };
 ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 새로고침하세요.'; };
 const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
+// ---- tabs: tap a tab to switch, + opens a new one, x closes the current one ----
+const tabsEl = document.getElementById('tabs');
+function renderTabs(list) {
+  tabsEl.textContent = '';
+  list.forEach((t) => {
+    const b = document.createElement('button');
+    b.textContent = t.n + '. ' + (t.title || t.url || '새 탭');
+    if (t.active) b.className = 'on';
+    b.onclick = () => { send({ t: 'tab', n: t.n }); };
+    tabsEl.appendChild(b);
+  });
+  const add = document.createElement('button');
+  add.textContent = '+';
+  add.onclick = () => send({ t: 'newtab' });
+  tabsEl.appendChild(add);
+  if (list.length > 1) {
+    const x = document.createElement('button');
+    x.className = 'x';
+    x.textContent = '현재 탭 닫기';
+    x.onclick = () => send({ t: 'closetab' });
+    tabsEl.appendChild(x);
+  }
+}
+ws.addEventListener('open', () => { send({ t: 'tabs' }); setInterval(() => send({ t: 'tabs' }), 2500); });
+const go = () => {
+  const u = document.getElementById('url');
+  let v = u.value.trim();
+  if (!v) return;
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  send({ t: 'goto', u: v });
+  u.value = '';
+};
+document.getElementById('go').onclick = go;
+document.getElementById('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+
 const txt = document.getElementById('txt');
 c.addEventListener('click', (e) => {
   const r = c.getBoundingClientRect();
