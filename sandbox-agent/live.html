@@ -115,26 +115,31 @@ c.addEventListener('click', (e) => {
   send({ t: 'click', x: (e.clientX - r.left) * c.width / r.width, y: (e.clientY - r.top) * c.height / r.height });
   txt.focus({ preventScroll: true }); // phone keyboard pops up right after tapping a field on the screen
 });
-// Whatever is typed or pasted goes straight to Chrome (works for passwords too), then the box is cleared.
-// The box always holds one invisible marker character, so the phone keyboard's delete key has something
-// to delete: when the marker disappears we know Backspace was pressed (and send it to Chrome).
+// Typing: the box is only a buffer. After every change it is compared with what was sent last, and only the
+// difference (new letters, or Backspaces for deleted ones) goes to Chrome. The page never rewrites the box while
+// you type, so the phone keyboard is not interrupted (that made typing feel sticky). Works for passwords and
+// paste too. One invisible marker at the start lets the delete key work even when nothing has been typed yet.
 const MARK = '​';
-const reset = () => { txt.value = MARK; };
-const flush = () => {
-  const v = txt.value.split(MARK).join('');
-  if (v) send({ t: 'text', v });
-  reset();
+let last = MARK;
+const restart = () => { txt.value = MARK; last = MARK; };
+const sync = () => {
+  const v = txt.value;
+  let i = 0;
+  while (i < last.length && i < v.length && last[i] === v[i]) i++;
+  let del = last.length - i;
+  if (!v.startsWith(MARK)) del = last.length > 1 ? last.length - 1 : 1; // marker itself is not a letter in Chrome
+  const add = v.slice(i).split(MARK).join('');
+  if (del > 0 || add) send({ t: 'edit', del, add });
+  last = v;
+  if (!v.startsWith(MARK) || v.length > 200) restart();
 };
-reset();
-txt.addEventListener('focus', () => { if (!txt.value) reset(); });
-txt.addEventListener('input', (e) => {
-  if (e.isComposing) return; // wait for Korean/IME composition to finish
-  if (!txt.value.includes(MARK)) { send({ t: 'key', k: 'Backspace' }); reset(); return; }
-  flush();
-});
-txt.addEventListener('compositionend', flush);
-txt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); flush(); send({ t: 'key', k: 'Enter' }); } });
-document.getElementById('send').onclick = flush;
+restart();
+txt.addEventListener('focus', () => { if (!txt.value) restart(); });
+txt.addEventListener('input', sync);
+txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
+txt.addEventListener('compositionend', sync);
+txt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sync(); send({ t: 'key', k: 'Enter' }); restart(); } });
+document.getElementById('send').onclick = () => { sync(); };
 document.querySelectorAll('button[data-k]').forEach((b) => b.onclick = () => send({ t: 'key', k: b.dataset.k }));
 document.getElementById('up').onclick = () => send({ t: 'scroll', dy: -400 });
 document.getElementById('dn').onclick = () => send({ t: 'scroll', dy: 400 });

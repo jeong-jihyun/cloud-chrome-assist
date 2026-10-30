@@ -26,6 +26,28 @@ let ctx = null;
 let page = null;
 const pageListeners = new Set();
 
+// Many sites (Daum, Kakao...) keep you logged in with "session cookies", which Chromium drops when it closes.
+// So cookies are saved to a file (while running and right before stopping) and put back when Chrome starts.
+const COOKIE_FILE = path.join(ROOT, 'cookies.json');
+const COOKIE_DAYS = 30;
+let cookieTimer = null;
+
+async function saveCookies() {
+  if (!ctx) return;
+  try {
+    const cookies = await ctx.cookies();
+    if (cookies.length) fs.writeFileSync(COOKIE_FILE, JSON.stringify(cookies), { mode: 0o600 });
+  } catch {}
+}
+
+async function loadCookies() {
+  try {
+    const soon = Math.floor(Date.now() / 1000) + COOKIE_DAYS * 86400;
+    const cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf8')).map((c) => ({ ...c, expires: c.expires > 0 ? c.expires : soon }));
+    await ctx.addCookies(cookies);
+  } catch {}
+}
+
 async function ensure() {
   if (ctx && page && !page.isClosed()) return page;
   if (!ctx) {
@@ -46,7 +68,9 @@ async function ensure() {
         if (page) pageListeners.forEach((f) => f(page));
       });
     });
-    ctx.on('close', () => { ctx = null; page = null; });
+    ctx.on('close', () => { ctx = null; page = null; clearInterval(cookieTimer); });
+    await loadCookies();
+    cookieTimer = setInterval(saveCookies, 20000);
   }
   const pages = ctx.pages();
   page = pages[pages.length - 1] || (await ctx.newPage());
@@ -150,9 +174,10 @@ async function act(body) {
     return { text: p ? `browser on. url=${p.url()}` : 'browser idle (starts on first use)' };
   }
   if (a === 'stop') {
+    await saveCookies();
     if (ctx) await ctx.close().catch(() => {});
     ctx = null; page = null;
-    return { text: 'browser closed (profile kept)' };
+    return { text: 'browser closed (profile and logins kept)' };
   }
   const p = await ensure();
   if (a === 'tabs') return { text: tabText(await tabList()) };
@@ -253,31 +278,49 @@ wss.on('connection', async (ws) => {
     cur = await ensure();
     cdp = await ctx.newCDPSession(cur);
     cdp.on('Page.screencastFrame', (f) => {
-      if (ws.readyState === 1) ws.send(Buffer.from(f.data, 'base64'));
-      cdp && cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
+      const ack = () => { cdp && cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {}); };
+      // Ack only after the frame is actually written to the network: Chrome then sends the newest picture at the
+      // network's pace instead of piling up old frames (that backlog made typed letters appear late).
+      if (ws.readyState === 1) ws.send(Buffer.from(f.data, 'base64'), ack); else ack();
     });
-    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 55, maxWidth: VIEW.width, maxHeight: VIEW.height, everyNthFrame: 2 });
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 55, maxWidth: VIEW.width, maxHeight: VIEW.height, everyNthFrame: 1 });
   };
   const onPage = () => { startCast().catch(() => {}); };
   pageListeners.add(onPage);
-  try { await startCast(); } catch (e) { ws.send(JSON.stringify({ error: String(e.message || e) })); }
-  ws.on('message', async (m) => {
+  const reply = (o) => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
+  // Messages are handled strictly one after another (typed letters used to run at the same time and could arrive
+  // out of order), and the handler is attached BEFORE the screen starts so nothing sent right after connecting is lost.
+  let queue = Promise.resolve();
+  let tabsQueued = false;
+  ws.on('message', (m) => {
+    let t = '';
+    try { t = JSON.parse(m.toString()).t; } catch {}
+    if (t === 'tabs') { if (tabsQueued) return; tabsQueued = true; } // never pile up the periodic tab polls
+    queue = queue.then(async () => { if (t === 'tabs') tabsQueued = false; await handle(m); });
+  });
+  const handle = async (m) => {
     try {
       const d = JSON.parse(m.toString());
       const p = await ensure();
       if (d.t === 'click') await p.mouse.click(Number(d.x), Number(d.y));
       else if (d.t === 'text') await p.keyboard.insertText(String(d.v || ''));
+      else if (d.t === 'edit') {
+        // phone typing: delete the letters that changed, then insert the new ones (one message per change)
+        for (let k = 0; k < Math.min(Number(d.del) || 0, 200); k++) await p.keyboard.press('Backspace');
+        if (d.add) await p.keyboard.insertText(String(d.add));
+      }
       else if (d.t === 'key') await p.keyboard.press(String(d.k));
       else if (d.t === 'scroll') await p.mouse.wheel(0, Number(d.dy) || 300);
       else if (d.t === 'goto' && /^https?:\/\//i.test(String(d.u))) await p.goto(String(d.u), { waitUntil: 'domcontentloaded', timeout: 30000 });
       else if (d.t === 'tab') await switchTab(d.n);
       else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');
       else if (d.t === 'closetab') await closeTab(d.n);
-      if (['tabs', 'tab', 'newtab', 'closetab', 'goto'].includes(d.t)) ws.send(JSON.stringify({ tabs: await tabList() }));
-    } catch (e) { ws.send(JSON.stringify({ error: String(e.message || e).slice(0, 200) })); }
-  });
+      if (['tabs', 'tab', 'newtab', 'closetab', 'goto'].includes(d.t)) reply({ tabs: await tabList() });
+    } catch (e) { reply({ error: String(e.message || e).slice(0, 200) }); }
+  };
+  try { await startCast(); } catch (e) { reply({ error: String(e.message || e) }); }
   ws.on('close', () => { pageListeners.delete(onPage); stopCast(); });
 });
 
 server.listen(PORT, '0.0.0.0', () => console.log('agent listening on', PORT));
-process.on('SIGTERM', async () => { if (ctx) await ctx.close().catch(() => {}); process.exit(0); });
+process.on('SIGTERM', async () => { await saveCookies(); if (ctx) await ctx.close().catch(() => {}); process.exit(0); });
