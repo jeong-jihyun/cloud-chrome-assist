@@ -17,7 +17,7 @@
 </head>
 <body>
 <div id="bar">
-  <input id="txt" placeholder="여기에 입력 후 [입력] (비밀번호도 여기서 직접)" autocomplete="off" autocapitalize="off">
+  <input id="txt" placeholder="여기에 치거나 붙여넣기 (비밀번호도 바로 들어감)" autocomplete="off" autocapitalize="off">
   <button id="send">입력</button>
   <button class="s" data-k="Enter">Enter</button>
   <button class="s" data-k="Tab">Tab</button>
@@ -25,7 +25,7 @@
   <button class="s" id="up">▲</button>
   <button class="s" id="dn">▼</button>
 </div>
-<div id="msg">화면을 탭하면 클릭됩니다. 입력칸을 탭한 뒤 위 입력창에 쓰고 [입력]을 누르세요.</div>
+<div id="msg">화면의 로그인 칸을 탭하면 키패드가 뜹니다. 치는 글자가 바로 입력됩니다(붙여넣기도 됨).</div>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 <script>
 const q = new URLSearchParams(location.search);
@@ -40,11 +40,22 @@ ws.onmessage = async (e) => {
 };
 ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 새로고침하세요.'; };
 const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
+const txt = document.getElementById('txt');
 c.addEventListener('click', (e) => {
   const r = c.getBoundingClientRect();
   send({ t: 'click', x: (e.clientX - r.left) * c.width / r.width, y: (e.clientY - r.top) * c.height / r.height });
+  txt.focus({ preventScroll: true }); // phone keyboard pops up right after tapping a field on the screen
 });
-document.getElementById('send').onclick = () => { const t = document.getElementById('txt'); if (t.value) send({ t: 'text', v: t.value }); t.value = ''; };
+// Whatever is typed or pasted goes straight to Chrome (works for passwords too), then the box is cleared.
+const flush = () => { if (txt.value) send({ t: 'text', v: txt.value }); txt.value = ''; };
+txt.addEventListener('input', (e) => {
+  if (e.isComposing) return; // wait for Korean/IME composition to finish
+  if (e.inputType && e.inputType.startsWith('delete') && !txt.value) { send({ t: 'key', k: 'Backspace' }); return; }
+  flush();
+});
+txt.addEventListener('compositionend', flush);
+txt.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); flush(); send({ t: 'key', k: 'Enter' }); } });
+document.getElementById('send').onclick = flush;
 document.querySelectorAll('button[data-k]').forEach((b) => b.onclick = () => send({ t: 'key', k: b.dataset.k }));
 document.getElementById('up').onclick = () => send({ t: 'scroll', dy: -400 });
 document.getElementById('dn').onclick = () => send({ t: 'scroll', dy: 400 });
