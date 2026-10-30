@@ -310,7 +310,11 @@ wss.on('connection', async (ws) => {
         if (d.add) await p.keyboard.insertText(String(d.add));
       }
       else if (d.t === 'key') await p.keyboard.press(String(d.k));
-      else if (d.t === 'scroll') await p.mouse.wheel(0, Number(d.dy) || 300);
+      else if (d.t === 'scroll') {
+        // finger drags send exact distances at the touched spot; the ▲/▼ buttons send only dy
+        if (d.x !== undefined) await p.mouse.move(Number(d.x), Number(d.y));
+        await p.mouse.wheel(Number(d.dx) || 0, d.dy === undefined ? 300 : Number(d.dy) || 0);
+      }
       else if (d.t === 'goto' && /^https?:\/\//i.test(String(d.u))) await p.goto(String(d.u), { waitUntil: 'domcontentloaded', timeout: 30000 });
       else if (d.t === 'tab') await switchTab(d.n);
       else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');

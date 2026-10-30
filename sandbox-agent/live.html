@@ -17,8 +17,8 @@
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
-  #wrap{padding:4px}
-  canvas{width:100%;height:auto;background:#000;touch-action:manipulation;display:block}
+  #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
   #msg{padding:4px 8px;color:#fc6;min-height:18px}
 </style>
 </head>
@@ -32,6 +32,9 @@
   <button class="s" data-k="Enter">Enter</button>
   <button class="s" data-k="Tab">Tab</button>
   <button class="s" data-k="Backspace">⌫</button>
+  <button class="s" id="zin">＋</button>
+  <button class="s" id="zout">－</button>
+  <button class="s" id="zfit">맞춤</button>
   <button class="s" id="up">▲</button>
   <button class="s" id="dn">▼</button>
 </div>
@@ -110,15 +113,96 @@ document.getElementById('go').onclick = go;
 document.getElementById('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
 
 const txt = document.getElementById('txt');
-c.addEventListener('click', (e) => {
-  const r = c.getBoundingClientRect();
-  send({ t: 'click', x: (e.clientX - r.left) * c.width / r.width, y: (e.clientY - r.top) * c.height / r.height });
+// ---- tap, pinch-zoom and pan on the screen ----
+// Two fingers pinch to zoom (1x-4x), one finger drags the picture when zoomed in, a short tap clicks.
+const wrap = document.getElementById('wrap');
+let S = 1, TX = 0, TY = 0;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const applyView = () => {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  S = clamp(S, 1, 4);
+  TX = clamp(TX, w - w * S, 0);
+  TY = clamp(TY, h - h * S, 0);
+  c.style.transform = 'translate(' + TX + 'px,' + TY + 'px) scale(' + S + ')';
+};
+const zoomBy = (f) => {
+  const cx = wrap.clientWidth / 2, cy = wrap.clientHeight / 2;
+  const px = (cx - TX) / S, py = (cy - TY) / S, S1 = clamp(S * f, 1, 4);
+  S = S1; TX = cx - px * S1; TY = cy - py * S1; applyView();
+};
+document.getElementById('zin').onclick = () => zoomBy(1.5);
+document.getElementById('zout').onclick = () => zoomBy(1 / 1.5);
+document.getElementById('zfit').onclick = () => { S = 1; TX = 0; TY = 0; applyView(); };
+window.addEventListener('resize', applyView);
+
+function tapAt(x, y) {
+  const r = c.getBoundingClientRect(); // already includes the zoom/pan transform
+  send({ t: 'click', x: (x - r.left) * c.width / r.width, y: (y - r.top) * c.height / r.height });
   // Phone keyboard pops up right after tapping a field on the screen. The hidden input is moved to the tapped spot
   // first, so the browser has nothing to scroll to (a box at the top of the page made the screen jump up).
-  txt.style.left = Math.round(e.clientX) + 'px';
-  txt.style.top = Math.round(e.clientY) + 'px';
+  txt.style.left = Math.round(x) + 'px';
+  txt.style.top = Math.round(y) + 'px';
   txt.focus({ preventScroll: true });
-});
+}
+c.addEventListener('click', (e) => tapAt(e.clientX, e.clientY)); // mouse; touch taps are handled below
+
+// One finger dragging scrolls the page itself (like on a normal phone); sent at most every 40 ms.
+const scrollAcc = { dx: 0, dy: 0, x: 0, y: 0, timer: null };
+function flushScroll() {
+  clearTimeout(scrollAcc.timer); scrollAcc.timer = null;
+  const dx = Math.round(scrollAcc.dx), dy = Math.round(scrollAcc.dy);
+  if (!dx && !dy) return;
+  scrollAcc.dx -= dx; scrollAcc.dy -= dy;
+  send({ t: 'scroll', x: scrollAcc.x, y: scrollAcc.y, dx, dy });
+}
+const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+let gest = null;
+wrap.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) {
+    const [a, b] = e.touches;
+    gest = { mode: 'pinch', d: dist(a, b), cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2, S0: S, TX0: TX, TY0: TY };
+    e.preventDefault();
+  } else if (e.touches.length === 1) {
+    const t = e.touches[0];
+    gest = { mode: 'one', x: t.clientX, y: t.clientY, lx: t.clientX, ly: t.clientY, moved: false };
+  }
+}, { passive: false });
+wrap.addEventListener('touchmove', (e) => {
+  if (!gest) return;
+  e.preventDefault();
+  if (gest.mode === 'pinch' && e.touches.length === 2) {
+    const [a, b] = e.touches;
+    const r = wrap.getBoundingClientRect();
+    const S1 = clamp(gest.S0 * dist(a, b) / gest.d, 1, 4);
+    // keep the point that was under the fingers at the start under the fingers now
+    const px = (gest.cx - r.left - gest.TX0) / gest.S0, py = (gest.cy - r.top - gest.TY0) / gest.S0;
+    const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
+    S = S1; TX = mx - r.left - px * S1; TY = my - r.top - py * S1; applyView();
+  } else if (gest.mode === 'one' && e.touches.length === 1) {
+    const t = e.touches[0];
+    if (!gest.moved && Math.hypot(t.clientX - gest.x, t.clientY - gest.y) > 8) { gest.moved = true; gest.lx = gest.x; gest.ly = gest.y; }
+    if (gest.moved) {
+      const r = c.getBoundingClientRect(), k = c.width / r.width; // screen px -> page px
+      scrollAcc.dx -= (t.clientX - gest.lx) * k;
+      scrollAcc.dy -= (t.clientY - gest.ly) * k;
+      scrollAcc.x = (t.clientX - r.left) * k; scrollAcc.y = (t.clientY - r.top) * k;
+      gest.lx = t.clientX; gest.ly = t.clientY;
+      if (!scrollAcc.timer) scrollAcc.timer = setTimeout(flushScroll, 40);
+    }
+  }
+}, { passive: false });
+wrap.addEventListener('touchend', (e) => {
+  if (gest && gest.mode === 'one' && !gest.moved && e.changedTouches.length === 1) {
+    const t = e.changedTouches[0];
+    e.preventDefault(); // stops the browser's own follow-up click, so a tap is sent once
+    tapAt(t.clientX, t.clientY);
+  }
+  if (gest && gest.moved) flushScroll();
+  if (e.touches.length === 0) gest = null;
+  else if (e.touches.length === 1) gest = { mode: 'none' }; // one finger left after a pinch: ignore it (no tap, no scroll)
+}, { passive: false });
+wrap.addEventListener('touchcancel', () => { gest = null; });
+
 // Typing: the box is only a buffer. After every change it is compared with what was sent last, and only the
 // difference (new letters, or Backspaces for deleted ones) goes to Chrome. The page never rewrites the box while
 // you type, so the phone keyboard is not interrupted (that made typing feel sticky). Works for passwords and
