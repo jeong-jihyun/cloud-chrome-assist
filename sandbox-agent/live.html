@@ -40,10 +40,26 @@
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 <script>
 const q = new URLSearchParams(location.search);
-const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || ''));
-ws.binaryType = 'blob';
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || '');
 const c = document.getElementById('c'), g = c.getContext('2d'), msg = document.getElementById('msg');
-ws.onmessage = async (e) => {
+let ws = null;
+let retry = null;
+// Reconnects by itself: the phone browser drops the connection when it goes to the background
+// (e.g. while you approve a login in KakaoTalk), so reconnect on close and when the page comes back.
+function connect() {
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  clearTimeout(retry);
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'blob';
+  ws.onmessage = onMsg;
+  ws.onopen = () => { msg.textContent = ''; send({ t: 'tabs' }); };
+  ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 자동으로 다시 연결합니다...'; clearTimeout(retry); retry = setTimeout(connect, 1500); };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) connect(); });
+window.addEventListener('online', connect);
+window.addEventListener('pageshow', connect);
+async function onMsg(e) {
   if (typeof e.data === 'string') {
     try {
       const j = JSON.parse(e.data);
@@ -55,9 +71,8 @@ ws.onmessage = async (e) => {
   const bmp = await createImageBitmap(e.data);
   if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height; }
   g.drawImage(bmp, 0, 0);
-};
-ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 새로고침하세요.'; };
-const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
+}
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 // ---- tabs: tap a tab to switch, + opens a new one, x closes the current one ----
 const tabsEl = document.getElementById('tabs');
 function renderTabs(list) {
@@ -81,7 +96,8 @@ function renderTabs(list) {
     tabsEl.appendChild(x);
   }
 }
-ws.addEventListener('open', () => { send({ t: 'tabs' }); setInterval(() => send({ t: 'tabs' }), 2500); });
+setInterval(() => { if (ws && ws.readyState === 1) send({ t: 'tabs' }); else connect(); }, 2500);
+connect();
 const go = () => {
   const u = document.getElementById('url');
   let v = u.value.trim();
