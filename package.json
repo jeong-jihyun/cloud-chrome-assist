@@ -1,0 +1,10 @@
+{
+  "name": "cloud-chrome-assist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloud Chrome you can drive from Claude on mobile (Vercel Sandbox + MCP)",
+  "dependencies": {
+    "@vercel/sandbox": "^3.9.1"
+  }
+}

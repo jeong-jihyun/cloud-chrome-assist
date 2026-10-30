@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud Chrome 라이브 화면</title>
+<style>
+  body{margin:0;background:#111;color:#eee;font:14px system-ui,sans-serif}
+  #bar{padding:6px 8px;background:#222;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  #bar input{flex:1;min-width:140px;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
+  button{padding:8px 10px;border-radius:6px;border:0;background:#3b6ef5;color:#fff;font-size:14px}
+  button.s{background:#444}
+  #wrap{padding:4px}
+  canvas{width:100%;height:auto;background:#000;touch-action:manipulation;display:block}
+  #msg{padding:4px 8px;color:#fc6;min-height:18px}
+</style>
+</head>
+<body>
+<div id="bar">
+  <input id="txt" placeholder="여기에 입력 후 [입력] (비밀번호도 여기서 직접)" autocomplete="off" autocapitalize="off">
+  <button id="send">입력</button>
+  <button class="s" data-k="Enter">Enter</button>
+  <button class="s" data-k="Tab">Tab</button>
+  <button class="s" data-k="Backspace">⌫</button>
+  <button class="s" id="up">▲</button>
+  <button class="s" id="dn">▼</button>
+</div>
+<div id="msg">화면을 탭하면 클릭됩니다. 입력칸을 탭한 뒤 위 입력창에 쓰고 [입력]을 누르세요.</div>
+<div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
+<script>
+const q = new URLSearchParams(location.search);
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || ''));
+ws.binaryType = 'blob';
+const c = document.getElementById('c'), g = c.getContext('2d'), msg = document.getElementById('msg');
+ws.onmessage = async (e) => {
+  if (typeof e.data === 'string') { try { msg.textContent = JSON.parse(e.data).error || ''; } catch {} return; }
+  const bmp = await createImageBitmap(e.data);
+  if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height; }
+  g.drawImage(bmp, 0, 0);
+};
+ws.onclose = () => { msg.textContent = '연결이 끊겼습니다. 새로고침하세요.'; };
+const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
+c.addEventListener('click', (e) => {
+  const r = c.getBoundingClientRect();
+  send({ t: 'click', x: (e.clientX - r.left) * c.width / r.width, y: (e.clientY - r.top) * c.height / r.height });
+});
+document.getElementById('send').onclick = () => { const t = document.getElementById('txt'); if (t.value) send({ t: 'text', v: t.value }); t.value = ''; };
+document.querySelectorAll('button[data-k]').forEach((b) => b.onclick = () => send({ t: 'key', k: b.dataset.k }));
+document.getElementById('up').onclick = () => send({ t: 'scroll', dy: -400 });
+document.getElementById('dn').onclick = () => send({ t: 'scroll', dy: 400 });
+</script>
+</body>
+</html>
