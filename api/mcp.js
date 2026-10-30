@@ -43,6 +43,8 @@ const TOOLS = [
   { name: 'browser_extension_list', description: '장착된 확장 프로그램의 이름·버전·ID·팝업/설정 화면을 보여준다.', inputSchema: obj() },
   { name: 'browser_extension_remove', description: '확장 프로그램을 이름(또는 폴더 이름·ID)으로 삭제한다. 크롬이 다시 시작된다.', inputSchema: obj({ name: { type: 'string' }, restart: { type: 'boolean' } }, ['name']) },
   { name: 'browser_extension_open', description: '확장 프로그램의 팝업 또는 설정 화면을 새 탭으로 연다(툴바 팝업은 화면에 보이지 않으므로 탭으로 연다). 이후 browser_click 등으로 조작한다.', inputSchema: obj({ name: { type: 'string' }, page: { type: 'string', enum: ['popup', 'options'] } }, ['name']) },
+  { name: 'browser_requests', description: '사용자가 폰 화면의 마이크(또는 요청 입력칸)로 남긴 대기 중인 요청 목록을 보여준다. 사용자가 "요청 확인해줘"라고 하면 먼저 이걸 부른다. all=true면 처리한 요청도 보여준다.', inputSchema: obj({ all: { type: 'boolean' } }) },
+  { name: 'browser_request_done', description: '요청을 처리한 뒤 완료로 표시하고 한 줄 결과를 남긴다(폰 화면의 요청 목록에 보인다).', inputSchema: obj({ id: { type: 'string' }, result: { type: 'string' } }, ['id']) },
   { name: 'browser_live_view', description: '사용자가 폰에서 직접 로그인할 수 있는 라이브 화면 링크를 돌려준다. 비밀번호/2단계 인증/캡처는 이걸로 사용자가 직접 한다.', inputSchema: obj() },
   { name: 'browser_stop', description: '크롬과 샌드박스를 끈다(로그인 정보는 저장됨). 작업이 끝나면 호출해 한도를 아낀다.', inputSchema: obj() },
 ];
@@ -58,6 +60,8 @@ const ACTION = {
   browser_extension_list: () => ({ action: 'ext_list' }),
   browser_extension_remove: (a) => ({ action: 'ext_remove', name: a.name, restart: a.restart }),
   browser_extension_open: (a) => ({ action: 'ext_open', name: a.name, page: a.page }),
+  browser_requests: (a) => ({ action: 'request_list', all: !!a.all }),
+  browser_request_done: (a) => ({ action: 'request_done', id: a.id, result: a.result }),
   browser_tabs: () => ({ action: 'tabs' }),
   browser_tab_new: (a) => ({ action: 'tab_new', url: a.url }),
   browser_tab_switch: (a) => ({ action: 'tab_switch', n: a.n }),
@@ -107,7 +111,7 @@ export default async function handler(req, res) {
       return reply({
         protocolVersion: msg.params?.protocolVersion || '2025-03-26',
         capabilities: { tools: {} },
-        serverInfo: { name: 'cloud-chrome-assist', version: '0.4.0' },
+        serverInfo: { name: 'cloud-chrome-assist', version: '0.5.0' },
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':

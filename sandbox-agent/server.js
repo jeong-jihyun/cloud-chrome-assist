@@ -341,9 +341,12 @@ function findManifestDirs(root, maxDepth = 4) {
 }
 
 async function extAdd(body) {
-  const src = parseExtSource(body.source);
+  const src = body.buffer ? { kind: 'file' } : parseExtSource(body.source);
   let buf, label, hintName;
-  if (src.kind === 'store') {
+  if (src.kind === 'file') {
+    buf = body.buffer; label = '올린 파일 ' + String(body.filename || '').slice(0, 60);
+    hintName = String(body.filename || 'uploaded').replace(/\.(zip|crx)$/i, '');
+  } else if (src.kind === 'store') {
     buf = await download('https://clients2.google.com/service/update2/crx?response=redirect&prodversion=130.0&acceptformat=crx2,crx3&x=id%3D' + src.id + '%26uc');
     label = '크롬 웹스토어 ' + src.id; hintName = src.id;
   } else if (src.kind === 'github') {
@@ -412,6 +415,16 @@ const findExt = (key) => {
 
 // ---- macros: named lists of steps saved by Claude and replayed by name ----
 const MACRO_FILE = path.join(ROOT, 'macros.json');
+// Phone-to-Claude request box and a log of macro runs (shown in the macro tab of the phone screen).
+const REQ_FILE = path.join(ROOT, 'requests.json');
+const RUNS_FILE = path.join(ROOT, 'runs.json');
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; } };
+const writeJson = (f, o) => fs.writeFileSync(f, JSON.stringify(o));
+const logRun = (name, via, ok, summary) => {
+  const all = readJson(RUNS_FILE);
+  all.unshift({ name, via, ok, at: new Date().toISOString(), summary: String(summary || '').slice(0, 200) });
+  writeJson(RUNS_FILE, all.slice(0, 50));
+};
 const MACRO_ACTIONS = ['navigate', 'click', 'type', 'key', 'scroll', 'back', 'wait', 'tab_new', 'tab_switch', 'tab_close'];
 const MACRO_FIELDS = ['action', 'url', 'text', 'field', 'selector', 'key', 'dy', 'ms', 'n', 'submit'];
 const readMacros = () => { try { return JSON.parse(fs.readFileSync(MACRO_FILE, 'utf8')); } catch { return {}; } };
@@ -525,7 +538,39 @@ async function act(body) {
     writeMacros(all);
     return { text: '매크로 "' + name + '" 삭제했습니다.' };
   }
-  if (a === 'macro_run') return runMacro(body);
+  if (a === 'macro_run') {
+    const via = body.via === 'phone' ? '폰' : 'Claude';
+    try {
+      const r = await runMacro(body);
+      logRun(body.name, via, !/멈췄습니다/.test(r.text || ''), (r.text || '').split('\n')[0]);
+      return r;
+    } catch (e) { logRun(body.name, via, false, e.message); throw e; }
+  }
+  if (a === 'request_add') {
+    const text = String(body.text || '').trim().slice(0, 500);
+    if (!text) throw new Error('요청 내용이 비어 있습니다.');
+    const all = readJson(REQ_FILE);
+    all.unshift({ id: Date.now().toString(36), text, at: new Date().toISOString(), status: 'new', result: '' });
+    writeJson(REQ_FILE, all.slice(0, 50));
+    return { text: '요청함에 저장했습니다.' };
+  }
+  if (a === 'request_list') {
+    const all = readJson(REQ_FILE).filter((r) => body.all || r.status === 'new');
+    return { text: all.length ? all.map((r) => '- [' + r.id + '] ' + r.text + ' (' + r.at.slice(5, 16).replace('T', ' ') + ' UTC)').join('\n') : '대기 중인 요청이 없습니다.' };
+  }
+  if (a === 'request_done') {
+    const all = readJson(REQ_FILE);
+    const r = all.find((x) => x.id === String(body.id));
+    if (!r) throw new Error('그런 요청이 없습니다: ' + body.id);
+    r.status = 'done'; r.result = String(body.result || '').slice(0, 300); r.doneAt = new Date().toISOString();
+    writeJson(REQ_FILE, all);
+    return { text: '요청 [' + r.id + '] 완료로 표시했습니다.' };
+  }
+  if (a === 'request_delete') {
+    writeJson(REQ_FILE, readJson(REQ_FILE).filter((x) => x.id !== String(body.id)));
+    return { text: '삭제했습니다.' };
+  }
+  if (a === 'history_data') return { data: { requests: readJson(REQ_FILE), runs: readJson(RUNS_FILE) } };
   if (a === 'wait') { await new Promise((r) => setTimeout(r, Math.min(Number(body.ms) || 1000, 10000))); return { text: 'waited' }; }
   if (a === 'ext_open') {
     const e = findExt(body.name);
@@ -624,6 +669,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
       return res.end(Buffer.from(r.data, 'base64'));
     } catch (e) { return send(500, String(e.message || e).slice(0, 300), 'text/plain'); }
+  }
+  if (url.pathname === '/upload' && req.method === 'POST') {
+    if (!okToken(req.headers['x-token'])) return send(401, { error: 'unauthorized' });
+    const chunks = []; let size = 0;
+    for await (const c of req) { size += c.length; if (size > 60 * 1024 * 1024) return send(413, { error: '파일이 너무 큽니다(최대 60MB).' }); chunks.push(c); }
+    try { return send(200, await extAdd({ buffer: Buffer.concat(chunks), filename: url.searchParams.get('name') || 'uploaded.zip', path: url.searchParams.get('path') || '', restart: true })); }
+    catch (e) { return send(200, { error: String(e.message || e).slice(0, 500) }); }
   }
   if (url.pathname === '/api' && req.method === 'POST') {
     if (!okToken(req.headers['x-token'])) return send(401, { error: 'unauthorized' });

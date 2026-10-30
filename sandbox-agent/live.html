@@ -45,6 +45,7 @@
   <button id="reload" aria-label="새로고침">⟳</button>
   <input id="url" placeholder="주소 입력 (예: naver.com)" autocapitalize="off" autocomplete="off" inputmode="url">
   <button id="go">이동</button>
+  <button id="mic" aria-label="Claude에게 말하기">🎤</button>
 </div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
@@ -118,9 +119,10 @@ window.addEventListener('resize', reportSoon);
 window.addEventListener('orientationchange', reportSoon);
 // ---- tabs: tap a tab to switch, + opens a new one, each tab has its own x; the bar scrolls sideways when full ----
 const tabsEl = document.getElementById('tabs');
-let activeTabEl = null, lastActiveEl = null;
+let activeTabEl = null, lastActiveEl = null, curUrl = '';
 function renderTabs(list) {
   const here = list.find((t) => t.active), urlBox = document.getElementById('url');
+  curUrl = (here && here.url) || '';
   if (here && document.activeElement !== urlBox) urlBox.placeholder = (here.url || '').replace(/^https?:\/\//, '') || '주소 입력 (예: naver.com)';
   tabsEl.textContent = '';
   list.forEach((t) => {
@@ -172,17 +174,67 @@ navBtn.ext.onclick = () => showView('ext');
 document.addEventListener('focusin', (e) => { if (e.target.tagName === 'INPUT') { navHidden = true; document.getElementById('nav').style.display = 'none'; } });
 document.addEventListener('focusout', () => { setTimeout(() => { if (document.activeElement && document.activeElement.tagName === 'INPUT') return; navHidden = false; document.getElementById('nav').style.display = 'flex'; }, 100); });
 const mk = (tag, props, ...kids) => { const e = document.createElement(tag); Object.assign(e, props || {}); kids.forEach((k) => e.append(k)); return e; };
+// ---- ask Claude: the mic (or a text box) puts a request in the request box; Claude reads it with browser_requests ----
+async function sendRequest(text) {
+  text = (text || '').trim();
+  if (!text) return false;
+  const r = await API({ action: 'request_add', text }).catch((e) => ({ error: String(e) }));
+  msg.textContent = r.error ? '요청을 저장하지 못했습니다: ' + r.error : '요청함에 저장했습니다: "' + text.slice(0, 40) + '" — Claude에게 "요청 확인해줘"라고 하면 실행합니다.';
+  if (view === 'macro') loadMacros();
+  return !r.error;
+}
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function listen() {
+  if (!SR) { const t = prompt('Claude에게 시킬 일을 입력하세요 (이 브라우저는 음성 인식을 지원하지 않습니다)'); return sendRequest(t); }
+  const rec = new SR(); rec.lang = 'ko-KR'; rec.interimResults = false; rec.maxAlternatives = 1;
+  const mic = document.getElementById('mic');
+  mic.textContent = '🔴'; msg.textContent = '듣는 중... 말씀하세요';
+  rec.onresult = (e) => { const t = e.results[0][0].transcript; if (confirm('Claude에게 전달할까요?\n\n' + t)) sendRequest(t); else msg.textContent = ''; };
+  rec.onerror = (e) => { msg.textContent = '음성 인식 오류: ' + (e.error || '') + (e.error === 'not-allowed' ? ' (마이크 권한을 허용해 주세요)' : ''); };
+  rec.onend = () => { mic.textContent = '🎤'; };
+  try { rec.start(); } catch (e) { mic.textContent = '🎤'; msg.textContent = '마이크를 시작하지 못했습니다.'; }
+}
+document.getElementById('mic').onclick = listen;
+const when = (iso) => { try { return new Date(iso).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+let macroInfo = {};
+// run a saved macro (asks for its {{variables}} first); used by the list, the run log and the quick-run chips
+async function runByName(name, outEl, preset) {
+  const m = macroInfo[name]; if (!m) { if (outEl) outEl.textContent = '"' + name + '" 매크로가 더 이상 없습니다.'; return; }
+  const vars = preset || {};
+  if (!preset) for (const v of m.vars) { const val = prompt('"' + name + '" 실행: ' + v + ' 값을 입력하세요'); if (val === null) return; vars[v] = val; }
+  if (outEl) outEl.textContent = '실행 중...';
+  const rr = await API({ action: 'macro_run', name, vars, via: 'phone' }).catch((e) => ({ error: String(e) }));
+  const t = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 400);
+  if (outEl) outEl.textContent = t;
+  loadMacros().then(() => { const top = mk('div', { className: 'card', textContent: (rr.error || /멈췄습니다/.test(t) ? '❌ ' : '✅ ') + '"' + name + '" ' + t.split('\n')[0].slice(0, 120) }); els.macro.prepend(top); });
+}
 async function loadMacros() {
   const box = els.macro; box.textContent = '불러오는 중...';
-  const r = await API({ action: 'macro_data' }).catch((e) => ({ error: String(e) }));
+  const [r, h] = await Promise.all([API({ action: 'macro_data' }), API({ action: 'history_data' })]).catch((e) => [{ error: String(e) }, {}]);
   box.textContent = '';
-  box.append(mk('h3', { textContent: '매크로' }));
+  box.append(mk('h3', { textContent: 'Claude에게 요청' }));
+  const ask = mk('input', { className: 'add', placeholder: '예: 다음 메일함 열어서 안 읽은 메일 알려줘', autocapitalize: 'off' });
+  const sendB = mk('button', { textContent: '보내기' }); sendB.onclick = async () => { if (await sendRequest(ask.value)) ask.value = ''; };
+  box.append(mk('div', { className: 'card' }, mk('div', { className: 'row' }, ask, sendB, mk('button', { textContent: '🎤', onclick: listen })),
+    mk('div', { className: 'ds', textContent: '여기 남긴 요청은 요청함에 저장됩니다. Claude 대화에서 "요청 확인해줘"라고 하면 Claude가 읽고 실행한 뒤 결과를 아래에 표시합니다. (Claude가 알아서 깨어나지는 않습니다.)' })));
+  const reqs = (h.data && h.data.requests) || [];
+  box.append(mk('h3', { textContent: '요청 목록' }));
+  if (!reqs.length) box.append(mk('div', { className: 'empty', textContent: '아직 요청이 없습니다.' }));
+  reqs.slice(0, 10).forEach((q2) => {
+    const del = mk('button', { className: 'del', textContent: '삭제' }); del.onclick = async () => { await API({ action: 'request_delete', id: q2.id }); loadMacros(); };
+    box.append(mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: (q2.status === 'done' ? '✅ ' : '⏳ ') + q2.text }),
+      mk('div', { className: 'ds', textContent: when(q2.at) + (q2.status === 'done' ? ' · ' + (q2.result || '완료') : ' · 대기 중') }), mk('div', { className: 'row' }, del)));
+  });
+  box.append(mk('h3', { textContent: '저장된 매크로' }));
   if (r.error) { box.append(mk('div', { className: 'empty', textContent: r.error })); return; }
   const list = (r.data && r.data.macros) || [];
+  macroInfo = {}; list.forEach((m) => { macroInfo[m.name] = m; });
   if (!list.length) box.append(mk('div', { className: 'empty', textContent: '저장된 매크로가 없습니다. Claude에게 "이 작업을 매크로로 저장해 줘"라고 하면 여기에 나타납니다.' }));
   list.forEach((m) => {
     const inputs = {};
-    const card = mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: m.name + ' (' + m.steps + '단계)' }));
+    const nmEl = mk('div', { className: 'nm', textContent: '▶ ' + m.name + ' (' + m.steps + '단계)' });
+    nmEl.style.cursor = 'pointer';
+    const card = mk('div', { className: 'card' }, nmEl);
     if (m.note) card.append(mk('div', { className: 'ds', textContent: m.note }));
     card.append(mk('div', { className: 'ds', textContent: m.desc }));
     if (m.vars.length) {
@@ -191,35 +243,76 @@ async function loadMacros() {
       card.append(row);
     }
     const out = mk('div', { className: 'ds' });
+    nmEl.onclick = () => { if (!m.vars.length) run.click(); };
     const run = mk('button', { textContent: '▶ 실행' });
-    run.onclick = async () => {
-      const vars = {}; for (const k of Object.keys(inputs)) vars[k] = inputs[k].value;
-      run.disabled = true; out.textContent = '실행 중...';
-      const rr = await API({ action: 'macro_run', name: m.name, vars }).catch((e) => ({ error: String(e) }));
-      run.disabled = false; out.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 400);
-    };
+    run.onclick = () => { const vars = {}; for (const k of Object.keys(inputs)) vars[k] = inputs[k].value; run.disabled = true; runByName(m.name, out, vars).finally(() => { run.disabled = false; }); };
     const del = mk('button', { className: 'del', textContent: '삭제' });
     del.onclick = async () => { if (!confirm('"' + m.name + '" 매크로를 삭제할까요?')) return; await API({ action: 'macro_delete', name: m.name }); loadMacros(); };
     card.append(mk('div', { className: 'row' }, run, del), out);
     box.append(card);
   });
+  box.append(mk('h3', { textContent: '실행 기록' }));
+  const runs = (h.data && h.data.runs) || [];
+  if (!runs.length) box.append(mk('div', { className: 'empty', textContent: '아직 실행한 매크로가 없습니다.' }));
+  runs.slice(0, 15).forEach((x) => {
+    const out = mk('div', { className: 'ds' });
+    const again = mk('button', { textContent: '▶ 다시 실행' }); again.onclick = () => runByName(x.name, out);
+    if (!macroInfo[x.name]) again.disabled = true;
+    box.append(mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: (x.ok ? '✅ ' : '❌ ') + x.name }), mk('div', { className: 'ds', textContent: when(x.at) + ' · ' + x.via + '이(가) 실행 · ' + x.summary }), mk('div', { className: 'row' }, again), out));
+  });
 }
+// popular extensions (installed from the Chrome Web Store by ID; V2-only ones are refused with a message)
+const POPULAR = [
+  ['uBlock Origin Lite', '광고 차단', 'ddkjiahejlhfcafbddmgiahcphecmpfh'],
+  ['Dark Reader', '모든 사이트 다크 모드', 'eimadpbcbfnmbkopoojfekhnkhdbieeh'],
+  ['Bitwarden', '비밀번호 관리자', 'nngceckbapebfimnlniiiahkandclblb'],
+  ['Vimium', '키보드로 링크 이동', 'dbepggeogbaibhgnhhndojpepiihcmeb'],
+  ['SponsorBlock', '유튜브 광고 구간 건너뛰기', 'mnjggcdmjocbbbhaepdhchncahnbgone'],
+  ['Tampermonkey', '사용자 스크립트', 'dhdgffkkebhmkfjojejmpbldmpobfkfo'],
+  ['I still don\'t care about cookies', '쿠키 배너 숨기기', 'edibdbjcniadpccecjdfdjjppcpchdlm'],
+  ['SingleFile', '페이지를 한 파일로 저장', 'mpiodijhokgodhhofbcjdecpffjipkle'],
+  ['Google 번역', '선택한 글 번역', 'aapbdbdomjkkjkaonfhkkikfgjllcleb'],
+  ['Wappalyzer', '사이트 기술 확인', 'gppongmhjkpfnbhagpmjfkannfbllamg'],
+];
 async function loadExts() {
   const box = els.ext; box.textContent = '불러오는 중...';
   const r = await API({ action: 'ext_data' }).catch((e) => ({ error: String(e) }));
   box.textContent = '';
-  box.append(mk('h3', { textContent: '익스텐션 (확장 프로그램)' }));
-  const src = mk('input', { className: 'add', placeholder: '확장 ID, 웹스토어 주소, GitHub 주소, zip 주소', autocapitalize: 'off', autocomplete: 'off' });
-  const addBtn = mk('button', { textContent: '추가' });
   const st = mk('div', { className: 'ds' });
-  addBtn.onclick = async () => {
-    if (!src.value.trim()) return;
-    addBtn.disabled = true; st.textContent = '설치 중... (크롬이 잠깐 다시 시작됩니다)';
-    const rr = await API({ action: 'ext_add', source: src.value.trim() }).catch((e) => ({ error: String(e) }));
-    addBtn.disabled = false; st.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 300);
+  const install = async (source, btn, extra) => {
+    if (btn) btn.disabled = true; st.textContent = '설치 중... (크롬이 잠깐 다시 시작됩니다)';
+    const rr = await API({ action: 'ext_add', source, ...(extra || {}) }).catch((e) => ({ error: String(e) }));
+    if (btn) btn.disabled = false;
+    st.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 300);
+    if (!rr.error) loadExts().then(() => { els.ext.prepend(mk('div', { className: 'card', textContent: '✅ ' + st.textContent.split('\n')[0] })); });
+  };
+  box.append(mk('h3', { textContent: '크롬 웹스토어' }));
+  const sq = mk('input', { className: 'add', placeholder: '스토어에서 찾을 이름 (예: 번역)', autocapitalize: 'off' });
+  const goStore = mk('button', { textContent: '스토어에서 찾기' });
+  goStore.onclick = () => { const u = 'https://chromewebstore.google.com/' + (sq.value.trim() ? 'search/' + encodeURIComponent(sq.value.trim()) : ''); send({ t: 'newtab', u }); showView('browser'); refreshSoon(); msg.textContent = '마음에 드는 확장 페이지를 연 뒤, 익스텐션 탭에서 "지금 보는 페이지 설치"를 누르세요.'; };
+  const here = mk('button', { textContent: '지금 보는 페이지 설치' });
+  here.onclick = () => { if (!/chromewebstore\.google\.com|chrome\.google\.com\/webstore/.test(curUrl)) { st.textContent = '브라우저 탭에서 크롬 웹스토어의 확장 프로그램 페이지를 연 상태에서 눌러 주세요. 지금 주소: ' + (curUrl || '없음'); return; } install(curUrl, here); };
+  box.append(mk('div', { className: 'card' }, mk('div', { className: 'row' }, sq, goStore), mk('div', { className: 'row' }, here), st));
+  box.append(mk('h3', { textContent: '인기 확장 프로그램' }));
+  POPULAR.forEach(([nm, ds, id]) => {
+    const b = mk('button', { textContent: '설치' }); b.onclick = () => install(id, b);
+    box.append(mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: nm }), mk('div', { className: 'ds', textContent: ds }), mk('div', { className: 'row' }, b)));
+  });
+  box.append(mk('h3', { textContent: '직접 등록 (커스텀)' }));
+  const src = mk('input', { className: 'add', placeholder: 'GitHub 주소, zip/crx 주소, 확장 ID', autocapitalize: 'off', autocomplete: 'off' });
+  const addBtn = mk('button', { textContent: '등록' }); addBtn.onclick = () => { if (src.value.trim()) install(src.value.trim(), addBtn); };
+  const file = mk('input', { type: 'file', accept: '.zip,.crx' });
+  const upBtn = mk('button', { textContent: '파일 올려 등록' });
+  upBtn.onclick = async () => {
+    const f = file.files && file.files[0];
+    if (!f) { st.textContent = '먼저 위에서 zip 또는 crx 파일을 고르세요.'; return; }
+    upBtn.disabled = true; st.textContent = '올리는 중... (' + Math.round(f.size / 1024) + 'KB)';
+    const rr = await fetch('/upload?name=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'x-token': q.get('token') || '' }, body: f }).then((x) => x.json()).catch((e) => ({ error: String(e) }));
+    upBtn.disabled = false; st.textContent = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 300);
     if (!rr.error) loadExts();
   };
-  box.append(mk('div', { className: 'card' }, mk('div', { className: 'row' }, src, addBtn), st));
+  box.append(mk('div', { className: 'card' }, mk('div', { className: 'row' }, src, addBtn), mk('div', { className: 'ds', textContent: '또는 내 폰의 확장 프로그램 파일(.zip / .crx)을 올립니다. 압축 안에 manifest.json이 있어야 하고, Manifest V3만 됩니다.' }), mk('div', { className: 'row' }, file, upBtn)));
+  box.append(mk('h3', { textContent: '설치된 확장 프로그램' }));
   if (r.error) { box.append(mk('div', { className: 'empty', textContent: r.error })); return; }
   const list = (r.data && r.data.exts) || [];
   if (!list.length) box.append(mk('div', { className: 'empty', textContent: '설치된 확장 프로그램이 없습니다.' }));
