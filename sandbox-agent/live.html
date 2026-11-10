@@ -31,7 +31,9 @@
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
-  #kbhide{display:none;position:fixed;right:12px;top:52px;z-index:9;padding:8px 12px;border-radius:18px;background:#c33;color:#fff;border:0;opacity:.95}
+  #kbbar{display:flex;padding:0 8px 6px;background:#222}
+  #kbhide{flex:1;padding:9px;border-radius:8px;border:0;background:#444;color:#fff;font-size:15px}
+  #kbhide.on{background:#c33}
   #zfit{display:none;position:fixed;right:12px;bottom:68px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
   #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
@@ -48,9 +50,9 @@
   <button id="go">이동</button>
   <button id="mic" aria-label="Claude에게 말하기">🎤</button>
 </div>
+<div id="kbbar"><button id="kbhide">⌨ 키패드 보이기</button></div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
-<button id="kbhide">⌨ 키패드 숨기기</button>
 <button id="zfit">맞춤</button>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 </div>
@@ -497,9 +499,14 @@ const sync = () => {
   if (!v.startsWith(MARK) || v.length > 200) restart();
 };
 restart();
-txt.addEventListener('focus', () => { if (!txt.value) restart(); document.getElementById('kbhide').style.display = 'block'; });
-txt.addEventListener('blur', () => { document.getElementById('kbhide').style.display = 'none'; });
-document.getElementById('kbhide').addEventListener('pointerdown', (e) => { e.preventDefault(); txt.blur(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
+const kbBtn = document.getElementById('kbhide');
+const kbShown = () => { const a = document.activeElement; return !!a && a.tagName === 'INPUT'; };
+const kbLabel = () => { const on = kbShown(); kbBtn.textContent = on ? '⌨ 키패드 감추기' : '⌨ 키패드 보이기'; kbBtn.classList.toggle('on', on); };
+kbBtn.addEventListener('mousedown', (e) => e.preventDefault());
+kbBtn.addEventListener('click', () => { if (kbShown()) document.activeElement.blur(); else txt.focus({ preventScroll: true }); setTimeout(kbLabel, 50); });
+document.addEventListener('focusin', () => setTimeout(kbLabel, 0));
+document.addEventListener('focusout', () => setTimeout(kbLabel, 150));
+kbLabel();
 txt.addEventListener('input', sync);
 txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
 txt.addEventListener('compositionend', sync);
