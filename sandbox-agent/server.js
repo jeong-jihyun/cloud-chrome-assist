@@ -16,6 +16,7 @@ const PROFILE = path.join(ROOT, 'profile');
 const VIEW = { width: 1100, height: 720 };
 // Size of every tab, in CSS pixels, plus the pixel density. The phone reports its own size (see 'viewport' below).
 let VIEWSPEC = { w: VIEW.width, h: VIEW.height, dpr: 1 };
+let inputUntil = 0; // pictures pause until this time (set while a tap is being delivered)
 const viewSessions = new Map(); // page -> CDP session that holds the size override (it must stay open to keep it)
 
 if (TOKEN.length < 24) { console.error('token too short'); process.exit(1); }
@@ -711,18 +712,27 @@ wss.on('connection', async (ws) => {
   // One capture at a time; if the screen changes meanwhile, capture again right after. The next capture starts only
   // when the previous picture has been written to the network, so slow connections never pile up old pictures.
   let busy = false, dirty = false, viewTimer = null, healing = false, healCount = 0;
-  const pump = async () => {
-    if (busy) { dirty = true; return; }
+  let capP = Promise.resolve(), lastBuf = null, quietUntil = 0;
+  // Taking pictures while a tap is delivered made Chrome drop the tap (found by test: 1 of 30 taps landed). So taps wait for the
+  // picture in progress and pause new ones. A picture identical to the last one is not sent, and the frames Chrome produces
+  // because of our own capture are ignored for a moment, so an unchanged screen costs nothing.
+  const pump = () => { if (busy) { dirty = true; return capP; } capP = pumpRun(); return capP; };
+  const kick = () => { pump(); setTimeout(pump, 120); setTimeout(pump, 600); }; // after any input: look again soon
+  const pumpRun = async () => {
     busy = true;
     try {
       do {
+        while (Date.now() < inputUntil) await sleepMs(25);
         dirty = false;
         if (!cdp || ws.readyState !== 1) break;
         // capture through the same connection that holds the size/density setting, otherwise it comes out 1x
         const shooter = (cur && viewSessions.get(cur)) || cdp;
         const r = await shooter.send('Page.captureScreenshot', { format: 'jpeg', quality: 55, fromSurface: true });
         const buf = Buffer.from(r.data, 'base64');
-        if (ws.readyState === 1) await new Promise((res) => ws.send(buf, res));
+        const same = lastBuf && Buffer.compare(lastBuf, buf) === 0;
+        lastBuf = buf;
+        if (same) quietUntil = Date.now() + 250;
+        else if (ws.readyState === 1) await new Promise((res) => ws.send(buf, res));
         // self-check: if the picture is not the size the phone asked for (Chrome sometimes drops the size setting
         // after a restart), rebuild the size connection from scratch and capture again
         const jw = jpegWidth(buf), want = Math.round(VIEWSPEC.w * VIEWSPEC.dpr);
@@ -730,8 +740,9 @@ wss.on('connection', async (ws) => {
           healCount++;
           healing = true;
           try { viewSessions.delete(cur); await ensureView(cur, 3); } catch {}
-          healing = false; dirty = true;
+          healing = false; dirty = true; lastBuf = null;
         }
+        if (same) dirty = false;
       } while (dirty);
     } catch {}
     busy = false;
@@ -746,7 +757,7 @@ wss.on('connection', async (ws) => {
     // signal "the screen changed". The picture sent to the phone is a real capture at full pixel density.
     cdp.on('Page.screencastFrame', (f) => {
       cdp && cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
-      pump();
+      if (Date.now() >= quietUntil) pump();
     });
     await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 20, maxWidth: 120, maxHeight: 120, everyNthFrame: 1 });
     pump();
@@ -754,6 +765,20 @@ wss.on('connection', async (ws) => {
   const onPage = () => { startCast().catch(() => {}); };
   pageListeners.add(onPage);
   const reply = (o) => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
+  // Tells the phone whether a text field has the focus on the page, so it shows the keypad only then and hides it otherwise.
+  const probeFocus = async () => {
+    try {
+      const pg = await ensure();
+      const ed = await pg.evaluate(() => {
+        const a = document.activeElement; if (!a || a === document.body) return false;
+        const t = a.tagName;
+        if (t === 'TEXTAREA' || t === 'IFRAME') return true;
+        if (t === 'INPUT') return !['button', 'submit', 'checkbox', 'radio', 'range', 'file', 'color', 'image', 'reset'].includes((a.type || '').toLowerCase());
+        return !!a.isContentEditable;
+      });
+      reply({ focus: !!ed });
+    } catch {}
+  };
   // Messages are handled strictly one after another (typed letters used to run at the same time and could arrive
   // out of order), and the handler is attached BEFORE the screen starts so nothing sent right after connecting is lost.
   let queue = Promise.resolve();
@@ -768,7 +793,16 @@ wss.on('connection', async (ws) => {
     try {
       const d = JSON.parse(m.toString());
       const p = await ensure();
-      if (d.t === 'click') await p.mouse.click(Number(d.x), Number(d.y));
+      if (d.t === 'click') {
+        // a tap must land on the layout the phone is showing: if the size is still changing, finish that first
+        if (!(await viewMatches(p))) await ensureView(p, 2);
+        // while the mouse button goes down and up, stop taking pictures: the constant picture capture made some taps get lost
+        inputUntil = Date.now() + 2000;
+        try { await capP; await p.mouse.click(Number(d.x), Number(d.y), { delay: 40 }); }
+        finally { inputUntil = 0; } // pictures continue right after the tap, so the result shows at once
+        lastBuf = null; kick();
+        setTimeout(probeFocus, 80);
+      }
       else if (d.t === 'text') await p.keyboard.insertText(String(d.v || ''));
       else if (d.t === 'edit') {
         // phone typing: delete the letters that changed, then insert the new ones (one message per change)
@@ -805,11 +839,14 @@ wss.on('connection', async (ws) => {
       else if (d.t === 'tab') await switchTab(d.n);
       else if (d.t === 'newtab') await newTab(d.u ? String(d.u) : '');
       else if (d.t === 'closetab') await closeTab(d.n);
+      if (!['viewport', 'tabs', 'click'].includes(d.t)) kick();
+      if (d.t === 'key' || d.t === 'goto' || d.t === 'back') setTimeout(probeFocus, 400);
       if (['tabs', 'tab', 'newtab', 'closetab', 'goto', 'back', 'reload'].includes(d.t)) reply({ tabs: await tabList() });
     } catch (e) { reply({ error: String(e.message || e).slice(0, 200) }); }
   };
   try { await startCast(); } catch (e) { reply({ error: String(e.message || e) }); }
-  ws.on('close', () => { pageListeners.delete(onPage); stopCast(); });
+  const keepAlive = setInterval(() => { if (ws.readyState === 1) pump(); }, 1500); // catches changes no frame told us about
+  ws.on('close', () => { clearInterval(keepAlive); pageListeners.delete(onPage); stopCast(); });
 });
 
 server.listen(PORT, '0.0.0.0', () => console.log('agent listening on', PORT));

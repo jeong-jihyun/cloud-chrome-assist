@@ -31,6 +31,7 @@
   #urlbar{display:flex;gap:6px;padding:6px 8px;background:#222}
   #urlbar input{flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid #555;background:#000;color:#fff;font-size:16px}
   #txt{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px}
+  #kbhide{display:none;position:fixed;right:12px;top:52px;z-index:9;padding:8px 12px;border-radius:18px;background:#c33;color:#fff;border:0;opacity:.95}
   #zfit{display:none;position:fixed;right:12px;bottom:68px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
   #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
@@ -49,6 +50,7 @@
 </div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
+<button id="kbhide">⌨ 키패드 숨기기</button>
 <button id="zfit">맞춤</button>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 </div>
@@ -85,12 +87,16 @@ async function onMsg(e) {
     try {
       const j = JSON.parse(e.data);
       if (j.tabs) renderTabs(j.tabs);
+      // keypad only while a text field is focused on the page; a tap on anything else hides it
+      if (j.focus === true) { if (document.activeElement !== txt) txt.focus({ preventScroll: true }); }
+      if (j.focus === false && document.activeElement === txt) txt.blur();
       if (j.error) msg.textContent = j.error;
     } catch {}
     return;
   }
   const bmp = await createImageBitmap(e.data);
   if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height; }
+  if (settleUntil && Math.abs(bmp.width - settleW) <= Math.max(3, settleW * 0.03)) settleUntil = 0;
   g.drawImage(bmp, 0, 0);
 }
 const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
@@ -103,6 +109,7 @@ const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 let Z = 1;
 const ZMIN = 0.2;
 let vw = 0, vh = 0, curDpr = 1, sizeTimer = null;
+let settleW = 0, settleUntil = 0; // after a size change: taps wait until a picture of the new size has arrived
 function reportSize(force) {
   if (view !== 'browser') return;
   const r = wrap.getBoundingClientRect();
@@ -111,6 +118,7 @@ function reportSize(force) {
   if (!force && w === vw && Math.abs(h - vh) < 4) return;
   const base = Math.min(2, Math.max(1, Math.round((window.devicePixelRatio || 1) * 10) / 10));
   const dpr = Math.min(2, Math.max(0.25, Math.round(base * Z * 20) / 20));
+  if (w !== vw || Math.abs(h - vh) > 3) { settleW = w * dpr; settleUntil = Date.now() + 3000; }
   vw = w; vh = h; curDpr = dpr;
   send({ t: 'viewport', w, h, dpr });
 }
@@ -379,6 +387,7 @@ function commitZoom() {
 window.addEventListener('resize', () => { measure(); applyView(); });
 
 function tapAt(x, y) {
+  if (settleUntil && Date.now() < settleUntil) { msg.textContent = '화면 크기를 맞추는 중입니다. 잠시 후 다시 눌러 주세요.'; setTimeout(() => { if (msg.textContent.startsWith('화면 크기를')) msg.textContent = ''; }, 1500); return; }
   const r = c.getBoundingClientRect(); // already includes the zoom/pan transform
   send({ t: 'click', x: (x - r.left) * (vw || c.width) / r.width, y: (y - r.top) * (vh || c.height) / r.height });
   // Phone keyboard pops up right after tapping a field on the screen. The hidden input is moved to the tapped spot
@@ -488,7 +497,9 @@ const sync = () => {
   if (!v.startsWith(MARK) || v.length > 200) restart();
 };
 restart();
-txt.addEventListener('focus', () => { if (!txt.value) restart(); });
+txt.addEventListener('focus', () => { if (!txt.value) restart(); document.getElementById('kbhide').style.display = 'block'; });
+txt.addEventListener('blur', () => { document.getElementById('kbhide').style.display = 'none'; });
+document.getElementById('kbhide').addEventListener('pointerdown', (e) => { e.preventDefault(); txt.blur(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
 txt.addEventListener('input', sync);
 txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
 txt.addEventListener('compositionend', sync);
