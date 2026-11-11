@@ -87,6 +87,9 @@ async function ensureViewNow(p, tries) {
   return false;
 }
 
+let lastDialog = '';
+function onDialog(p) { p.on('dialog', async (d) => { lastDialog = d.type() + ': ' + d.message().slice(0, 300); console.log('[dialog]', lastDialog); try { await d.accept(); } catch {} }); }
+
 async function ensure() {
   if (ctx && page && !page.isClosed()) return page;
   if (!ctx) {
@@ -102,6 +105,7 @@ async function ensure() {
       args: ['--no-sandbox', '--disable-dev-shm-usage', ...(exts.length ? ['--disable-extensions-except=' + exts.join(','), '--load-extension=' + exts.join(',')] : [])],
     });
     ctx.on('page', (p) => {
+      onDialog(p);
       ensureView(p);
       p.on('domcontentloaded', () => ensureView(p, 2)); // a new page load must keep the size
       page = p;
@@ -115,7 +119,7 @@ async function ensure() {
       });
     });
     ctx.on('close', () => { ctx = null; page = null; clearInterval(cookieTimer); viewSessions.clear(); });
-    for (const pg of ctx.pages()) { ensureView(pg); pg.on('domcontentloaded', () => ensureView(pg, 2)); }
+    for (const pg of ctx.pages()) { onDialog(pg); ensureView(pg); pg.on('domcontentloaded', () => ensureView(pg, 2)); }
     await loadCookies();
     cookieTimer = setInterval(saveCookies, 20000);
   }
