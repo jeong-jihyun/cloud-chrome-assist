@@ -36,6 +36,7 @@
   #kbbar{display:flex;padding:0 8px 6px;background:#222}
   #kbhide{flex:1;padding:9px;border-radius:8px;border:0;background:#444;color:#fff;font-size:15px}
   #kbhide.on{background:#c33}
+  #kbbar .shot{flex:0 0 auto;margin-left:6px;padding:9px 10px;border-radius:8px;border:0;background:#2a6;color:#fff;font-size:15px}
   #zfit{display:none;position:fixed;right:12px;bottom:68px;z-index:5;padding:10px 14px;border-radius:20px;opacity:.9}
   #wrap{margin:4px;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   canvas{width:100%;height:auto;background:#000;display:block;transform-origin:0 0;will-change:transform}
@@ -52,7 +53,7 @@
   <button id="go">이동</button>
   <button id="mic" aria-label="Claude에게 말하기">🎤</button>
 </div>
-<div id="kbbar"><button id="kbhide">⌨ 키패드 보이기</button></div>
+<div id="kbbar"><button id="kbhide">⌨ 키패드 보이기</button><button class="shot" data-full="0">📷 화면</button><button class="shot" data-full="1">📷 전체</button></div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
 <div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
 <button id="zfit">맞춤</button>
@@ -515,6 +516,34 @@ kbBtn.addEventListener('click', () => { if (kbShown()) document.activeElement.bl
 document.addEventListener('focusin', () => setTimeout(kbLabel, 0));
 document.addEventListener('focusout', () => setTimeout(kbLabel, 150));
 kbLabel();
+// 스크린샷: 지금 화면(또는 페이지 전체)을 PNG로 받아 폰에 저장하거나 공유한다
+document.querySelectorAll('#kbbar .shot').forEach((btn) => {
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', async () => {
+    const full = btn.dataset.full === '1';
+    btn.disabled = true;
+    toast('📷 ' + (full ? '페이지 전체' : '지금 화면') + ' 찍는 중...', 20000);
+    try {
+      const r = await fetch('/shot?save=1&full=' + (full ? 1 : 0) + '&token=' + encodeURIComponent(q.get('token') || ''));
+      if (!r.ok) throw new Error(await r.text());
+      const name = r.headers.get('x-file-name') || 'chrome.png';
+      const blob = await r.blob();
+      const file = new File([blob], name, { type: 'image/png' });
+      let shared = false;
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: name }); shared = true; } catch (e) { if (e && e.name === 'AbortError') shared = true; }
+      }
+      if (!shared) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+        toast('✅ 저장했습니다: ' + name + ' (다운로드 폴더)');
+      } else toast('✅ 스크린샷 완료: ' + name);
+    } catch (e) { toast('❌ 스크린샷 실패: ' + String(e.message || e).slice(0, 120)); }
+    btn.disabled = false;
+  });
+});
 txt.addEventListener('input', sync);
 txt.addEventListener('compositionupdate', () => setTimeout(sync, 0));
 txt.addEventListener('compositionend', sync);

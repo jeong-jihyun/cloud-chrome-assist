@@ -677,6 +677,14 @@ const server = http.createServer(async (req, res) => {
     if (!okToken(url.searchParams.get('token'))) return send(401, 'unauthorized', 'text/plain');
     try {
       const p = await ensure();
+      if (url.searchParams.get('save')) {
+        // 폰에 저장하는 스크린샷: 선명한 PNG. full=1이면 페이지 전체(아래까지).
+        const full = url.searchParams.get('full') === '1';
+        const buf = await p.screenshot({ type: 'png', fullPage: full, timeout: 20000 });
+        const d = new Date(Date.now() + 9 * 3600 * 1000).toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store', 'content-disposition': `attachment; filename="chrome-${d}${full ? '-full' : ''}.png"`, 'x-file-name': `chrome-${d}${full ? '-full' : ''}.png` });
+        return res.end(buf);
+      }
       await ensureView(p, 2);
       const r = await viewSessions.get(p).send('Page.captureScreenshot', { format: 'jpeg', quality: 72, fromSurface: true });
       res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
