@@ -90,6 +90,8 @@ async function ensureViewNow(p, tries) {
 async function ensure() {
   if (ctx && page && !page.isClosed()) return page;
   if (!ctx) {
+    // a profile lock left by a killed Chrome (it records the old sandbox's hostname) makes the next start exit at once
+    for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) { try { fs.rmSync(path.join(PROFILE, f), { force: true }); } catch {} }
     const exts = extFolders();
     ctx = await pw.chromium.launchPersistentContext(PROFILE, {
       headless: true,
@@ -169,26 +171,32 @@ const SNAP_FN = () => {
   document.querySelectorAll('[data-ca-id]').forEach((e) => e.removeAttribute('data-ca-id'));
   const sel = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[contenteditable=true]';
   const out = [];
+  const seen = new Set();
   let i = 0;
   for (const el of document.querySelectorAll(sel)) {
     const r = el.getBoundingClientRect();
     const st = getComputedStyle(el);
     if (r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none') continue;
     if (r.bottom < 0 || r.top > innerHeight * 3) continue;
-    i += 1;
-    el.setAttribute('data-ca-id', String(i));
     const tag = el.tagName.toLowerCase();
     const type = el.type ? ':' + el.type : '';
     const isPw = el.type === 'password';
     const raw = el.getAttribute('aria-label') || el.innerText || (isPw ? '' : el.value) || el.placeholder || el.title || el.alt || '';
-    const label = String(raw).replace(/\s+/g, ' ').trim().slice(0, 80);
-    out.push('[' + i + '] ' + tag + type + ' "' + label + '"' + (el.href ? ' -> ' + String(el.href).slice(0, 100) : ''));
-    if (i >= 150) break;
+    const label = String(raw).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const isField = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!label && !isField) continue; // unlabeled icons only waste tokens
+    const line = tag + type + ' "' + label + '"' + (el.href ? ' -> ' + String(el.href).replace(/^https?:\/\//, '').slice(0, 70) : '');
+    if (seen.has(line)) continue; // repeated identical links (menus, footers)
+    seen.add(line);
+    i += 1;
+    el.setAttribute('data-ca-id', String(i));
+    out.push('[' + i + '] ' + line);
+    if (i >= 100) break;
   }
   return {
     title: document.title,
     url: location.href,
-    text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 4000),
+    text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 2500),
     items: out,
   };
 };
