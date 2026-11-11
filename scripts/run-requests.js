@@ -16,6 +16,10 @@ async function api(body, ms = 120000) {
   return j;
 }
 
+const fs = require('fs');
+const _log = console.log;
+console.log = (...a) => { _log(...a); try { if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, a.join(' ') + '\n\n'); } catch {} };
+
 const STOP = new Set(['열기', '열어', '열어줘', '실행', '해줘', '줘', '좀', '을', '를', '해', '주세요']);
 const words = (s) => String(s).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w && !STOP.has(w));
 
