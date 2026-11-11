@@ -16,6 +16,8 @@
   #tabs .tab .t{max-width:120px;overflow:hidden;text-overflow:ellipsis;padding-right:4px}
   #tabs .tab .cx{padding:8px 10px;font-size:16px;line-height:1;opacity:.85}
   #tabs #addtab{flex:0 0 auto}
+  button:disabled{opacity:.35}
+  #toast{display:none;position:fixed;left:12px;right:12px;bottom:64px;z-index:20;padding:12px 14px;border-radius:10px;background:#2a2a2a;color:#fff;border:1px solid #666;font-size:15px;line-height:1.4}
   #nav{position:fixed;left:0;right:0;bottom:0;height:52px;display:flex;background:#181818;border-top:1px solid #333;z-index:6}
   #nav button{flex:1;border-radius:0;background:transparent;color:#aaa;font-size:15px}
   #nav button.on{color:#fff;background:#262d44;font-weight:600}
@@ -58,6 +60,7 @@
 </div>
 <div id="macroView" class="panel"></div>
 <div id="extView" class="panel"></div>
+<div id="toast"></div>
 <div id="nav"><button id="nb" class="on">🌐 브라우저</button><button id="nm">⚡ 매크로</button><button id="ne">🧩 익스텐션</button></div>
 <script>
 const q = new URLSearchParams(location.search);
@@ -208,15 +211,20 @@ document.getElementById('mic').onclick = listen;
 const when = (iso) => { try { return new Date(iso).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 let macroInfo = {};
 // run a saved macro (asks for its {{variables}} first); used by the list, the run log and the quick-run chips
+let toastTimer = null;
+function toast(t, ms) { const el = document.getElementById('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms || 5000); }
 async function runByName(name, outEl, preset) {
-  const m = macroInfo[name]; if (!m) { if (outEl) outEl.textContent = '"' + name + '" 매크로가 더 이상 없습니다.'; return; }
+  const m = macroInfo[name]; if (!m) { toast('"' + name + '" 매크로가 저장돼 있지 않아 실행할 수 없습니다. (위 "저장된 매크로"에 있는 것만 실행됩니다)', 6000); return; }
   const vars = preset || {};
   if (!preset) for (const v of m.vars) { const val = prompt('"' + name + '" 실행: ' + v + ' 값을 입력하세요'); if (val === null) return; vars[v] = val; }
   if (outEl) outEl.textContent = '실행 중...';
+  toast('⏳ "' + name + '" 실행 중...', 60000);
   const rr = await API({ action: 'macro_run', name, vars, via: 'phone' }).catch((e) => ({ error: String(e) }));
   const t = rr.error ? '오류: ' + rr.error : (rr.text || '완료').slice(0, 400);
   if (outEl) outEl.textContent = t;
-  loadMacros().then(() => { const top = mk('div', { className: 'card', textContent: (rr.error || /멈췄습니다/.test(t) ? '❌ ' : '✅ ') + '"' + name + '" ' + t.split('\n')[0].slice(0, 120) }); els.macro.prepend(top); });
+  const sy = window.scrollY, st = els.macro.scrollTop;
+  toast((rr.error || /멈췄습니다/.test(t) ? '❌ ' : '✅ ') + '"' + name + '" ' + t.split('\n')[0].slice(0, 120) + ' — 브라우저 탭에서 확인하세요', 6000);
+  loadMacros().then(() => { window.scrollTo(0, sy); els.macro.scrollTop = st; });
 }
 async function loadMacros() {
   const box = els.macro; box.textContent = '불러오는 중...';
@@ -267,7 +275,7 @@ async function loadMacros() {
   runs.slice(0, 15).forEach((x) => {
     const out = mk('div', { className: 'ds' });
     const again = mk('button', { textContent: '▶ 다시 실행' }); again.onclick = () => runByName(x.name, out);
-    if (!macroInfo[x.name]) again.disabled = true;
+    if (!macroInfo[x.name]) again.style.opacity = '.45';
     box.append(mk('div', { className: 'card' }, mk('div', { className: 'nm', textContent: (x.ok ? '✅ ' : '❌ ') + x.name }), mk('div', { className: 'ds', textContent: when(x.at) + ' · ' + x.via + '이(가) 실행 · ' + x.summary }), mk('div', { className: 'row' }, again), out));
   });
 }
