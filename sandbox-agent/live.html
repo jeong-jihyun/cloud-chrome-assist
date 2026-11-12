@@ -53,9 +53,9 @@
   <button id="go">이동</button>
   <button id="mic" aria-label="Claude에게 말하기">🎤</button>
 </div>
-<div id="kbbar"><button id="kbhide">⌨ 키패드 보이기</button><button class="shot" data-full="0">📷 화면</button><button class="shot" data-full="1">📷 전체</button></div>
+<div id="kbbar"><button id="kbhide">⌨ 키패드 보이기</button><button id="kbauto" class="shot" style="background:#555">자동 꺼짐</button><button class="shot" data-full="0">📷 화면</button><button class="shot" data-full="1">📷 전체</button></div>
 <input id="txt" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="keyboard input">
-<div id="msg">화면의 입력칸을 탭하면 키패드가 뜹니다.</div>
+<div id="msg">키패드는 ⌨ 버튼으로 열고 닫습니다. (자동 모드를 켜면 입력칸을 누를 때 저절로 뜹니다)</div>
 <button id="zfit">맞춤</button>
 <div id="wrap"><canvas id="c" width="1100" height="720"></canvas></div>
 </div>
@@ -68,6 +68,8 @@ const q = new URLSearchParams(location.search);
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(q.get('token') || '');
 const c = document.getElementById('c'), g = c.getContext('2d'), msg = document.getElementById('msg');
 let ws = null, fails = 0;
+// 키패드 모드: 기본은 '수동'(버튼으로만 열고 닫음). '자동'은 입력칸을 누르면 저절로 뜸.
+let kbAuto = false; try { kbAuto = localStorage.getItem('kbAuto') === '1'; } catch {}
 let retry = null;
 // Reconnects by itself: the phone browser drops the connection when it goes to the background
 // (e.g. while you approve a login in KakaoTalk), so reconnect on close and when the page comes back.
@@ -94,8 +96,8 @@ async function onMsg(e) {
       const j = JSON.parse(e.data);
       if (j.tabs) renderTabs(j.tabs);
       // keypad only while a text field is focused on the page; a tap on anything else hides it
-      if (j.focus === true) { if (document.activeElement !== txt) txt.focus({ preventScroll: true }); }
-      if (j.focus === false && document.activeElement === txt) txt.blur();
+      if (j.focus === true && kbAuto) { if (document.activeElement !== txt) txt.focus({ preventScroll: true }); }
+      if (j.focus === false && kbAuto && document.activeElement === txt) txt.blur();
       if (j.error) msg.textContent = j.error;
     } catch {}
     return;
@@ -405,7 +407,7 @@ function tapAt(x, y) {
   // first, so the browser has nothing to scroll to (a box at the top of the page made the screen jump up).
   txt.style.left = Math.round(x) + 'px';
   txt.style.top = Math.round(y) + 'px';
-  txt.focus({ preventScroll: true });
+  if (kbAuto) txt.focus({ preventScroll: true });
 }
 c.addEventListener('click', (e) => tapAt(e.clientX, e.clientY)); // mouse; touch taps are handled below
 
@@ -515,6 +517,11 @@ kbBtn.addEventListener('mousedown', (e) => e.preventDefault());
 kbBtn.addEventListener('click', () => { if (kbShown()) document.activeElement.blur(); else txt.focus({ preventScroll: true }); setTimeout(kbLabel, 50); });
 document.addEventListener('focusin', () => setTimeout(kbLabel, 0));
 document.addEventListener('focusout', () => setTimeout(kbLabel, 150));
+const autoBtn = document.getElementById('kbauto');
+const autoLabel = () => { autoBtn.textContent = kbAuto ? '자동 켜짐' : '자동 꺼짐'; autoBtn.style.background = kbAuto ? '#2a6' : '#555'; };
+autoBtn.addEventListener('mousedown', (e) => e.preventDefault());
+autoBtn.addEventListener('click', () => { kbAuto = !kbAuto; try { localStorage.setItem('kbAuto', kbAuto ? '1' : '0'); } catch {} if (!kbAuto && document.activeElement === txt) txt.blur(); autoLabel(); toast(kbAuto ? '자동 켜짐: 입력칸을 누르면 키패드가 뜹니다' : '자동 꺼짐: 키패드는 ⌨ 버튼으로만 열립니다', 2500); });
+autoLabel();
 kbLabel();
 // 스크린샷: 지금 화면(또는 페이지 전체)을 PNG로 받아 폰에 저장하거나 공유한다
 document.querySelectorAll('#kbbar .shot').forEach((btn) => {
