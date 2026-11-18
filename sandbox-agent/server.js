@@ -756,7 +756,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api' && req.method === 'POST') {
     if (!okToken(req.headers['x-token'])) return send(401, { error: 'unauthorized' });
     let raw = '';
-    for await (const c of req) { raw += c; if (raw.length > 100000) return send(413, { error: 'too large' }); }
+    // 쿠키 전체 전송(수백 개)은 수백 KB가 되므로 한도를 넉넉히 둔다(기존 100KB는 '전부 보내기'에서 413이 났다).
+    for await (const c of req) { raw += c; if (raw.length > 20 * 1024 * 1024) return send(413, { error: '보낸 데이터가 너무 큽니다(최대 20MB).' }); }
     try { return send(200, await act(JSON.parse(raw || '{}'))); }
     catch (e) { return send(200, { error: String(e.message || e).slice(0, 500) }); }
   }
