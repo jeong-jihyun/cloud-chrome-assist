@@ -53,6 +53,42 @@ async function loadCookies() {
   } catch {}
 }
 
+// PC 크롬 확장(chrome.cookies.getAll)이 보낸 쿠키를 Playwright가 받는 형태로 바꾼다.
+// 확장 쿠키: {name,value,domain,path,secure,httpOnly,sameSite('no_restriction'|'lax'|'strict'|'unspecified'),session,expirationDate,hostOnly}
+function extCookiesToPlaywright(list) {
+  const out = [];
+  for (const c of list) {
+    if (!c || !c.name || c.value == null || !c.domain) continue;
+    // hostOnly 쿠키는 앞의 점이 없어야 하고, 그렇지 않은 쿠키는 점을 그대로 둔다(둘 다 addCookies가 받는다).
+    const domain = c.hostOnly ? String(c.domain).replace(/^\./, '') : String(c.domain);
+    const ck = {
+      name: String(c.name),
+      value: String(c.value),
+      domain,
+      path: c.path || '/',
+      httpOnly: !!c.httpOnly,
+      secure: !!c.secure,
+    };
+    const ss = String(c.sameSite || '').toLowerCase();
+    if (ss === 'strict') ck.sameSite = 'Strict';
+    else if (ss === 'lax') ck.sameSite = 'Lax';
+    else if (ss === 'no_restriction') { ck.sameSite = 'None'; ck.secure = true; } // None은 secure 필수
+    if (!c.session && c.expirationDate) ck.expires = Math.floor(Number(c.expirationDate));
+    out.push(ck);
+  }
+  return out;
+}
+
+// addCookies는 하나라도 형식이 틀리면 전부 실패하므로, 통째로 넣어 보고 안 되면 한 개씩 넣어 되는 것만 넣는다.
+async function addCookiesSafely(cookies) {
+  try { await ctx.addCookies(cookies); return { added: cookies.length, failed: 0 }; }
+  catch {
+    let added = 0, failed = 0;
+    for (const c of cookies) { try { await ctx.addCookies([c]); added++; } catch { failed++; } }
+    return { added, failed };
+  }
+}
+
 async function applyView(p) {
   try {
     let sess = viewSessions.get(p);
@@ -500,6 +536,25 @@ async function act(body) {
     return { text: 'browser closed (profile and logins kept)' };
   }
   if (a === 'ext_add') return extAdd(body);
+  if (a === 'cookies_import') {
+    const incoming = Array.isArray(body.cookies) ? body.cookies : [];
+    if (!incoming.length) throw new Error('받은 쿠키가 없습니다.');
+    const pw = extCookiesToPlaywright(incoming);
+    if (!pw.length) throw new Error('넣을 수 있는 쿠키가 없습니다.');
+    await ensure(); // ctx를 띄워 둔다(없으면 cookies.json을 먼저 읽는다)
+    const { added, failed } = await addCookiesSafely(pw);
+    await saveCookies(); // 지금 들어온 쿠키까지 파일에 저장 → 크롬이 다시 켜져도 유지
+    const domains = [...new Set(pw.map((c) => c.domain.replace(/^\./, '')))];
+    return { text: 'PC 로그인 쿠키 ' + added + '개를 클라우드 크롬에 넣었습니다' + (failed ? ' (형식이 안 맞는 ' + failed + '개는 건너뜀)' : '') + '.\n사이트: ' + domains.slice(0, 25).join(', ') + (domains.length > 25 ? ' 외 ' + (domains.length - 25) + '개' : '') };
+  }
+  if (a === 'cookies_info') {
+    await ensure();
+    const cks = await ctx.cookies();
+    const byDomain = {};
+    for (const c of cks) { const d = String(c.domain).replace(/^\./, ''); byDomain[d] = (byDomain[d] || 0) + 1; }
+    const rows = Object.entries(byDomain).sort((x, y) => y[1] - x[1]).map(([d, n]) => '- ' + d + ': ' + n + '개');
+    return { text: '클라우드 크롬에 들어 있는 쿠키 ' + cks.length + '개' + (rows.length ? '\n' + rows.slice(0, 40).join('\n') : ' (없음)') };
+  }
   if (a === 'ext_list') {
     const list = extList();
     return { text: list.length ? list.map((e) => '- ' + e.name + ' v' + e.version + ' (폴더 ' + e.slug + ', MV' + e.mv + ', ID ' + e.id + (e.running ? ', 실행 중' : '') + ')' + (e.popup ? '\n    팝업: ' + e.popup : '') + (e.options ? '\n    설정: ' + e.options : '')).join('\n') : '장착된 확장 프로그램이 없습니다.' };
