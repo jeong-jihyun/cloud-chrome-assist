@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 320px; font: 14px/1.5 -apple-system, "Malgun Gothic", sans-serif; margin: 0; padding: 14px; color: #1a1a1a; }
+  h1 { font-size: 15px; margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: #555; margin: 8px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; padding: 9px 8px; border: 0; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .primary { background: #2563eb; color: #fff; }
+  .ghost { background: #eef1f5; color: #1a1a1a; }
+  .link { background: none; color: #2563eb; font-weight: 400; text-decoration: underline; padding: 4px; }
+  #out { margin-top: 12px; font-size: 12px; color: #333; white-space: pre-wrap; word-break: break-all; min-height: 18px; }
+  .hint { font-size: 11px; color: #888; margin-top: 2px; }
+</style>
+</head>
+<body>
+  <h1>클라우드 크롬으로 로그인 보내기</h1>
+
+  <label for="url">클라우드 크롬 주소</label>
+  <input id="url" placeholder="https://cloud-chrome-assist.vercel.app">
+
+  <label for="key">연결 키 (ASSIST_KEY)</label>
+  <input id="key" type="password" placeholder="Claude 커넥터에 쓰는 키">
+
+  <label for="domains">보낼 사이트 (선택 · 쉼표로 구분, 비우면 전부)</label>
+  <input id="domains" placeholder="naver.com, daum.net, google.com">
+  <div class="hint">비워 두면 PC 크롬의 모든 로그인을 보냅니다.</div>
+
+  <div class="row">
+    <button id="save" class="ghost">설정 저장</button>
+    <button id="tab" class="ghost">이 사이트만</button>
+  </div>
+  <div class="row">
+    <button id="send" class="primary">로그인 보내기</button>
+  </div>
+
+  <div id="out"></div>
+
+<script src="popup.js"></script>
+</body>
+</html>
