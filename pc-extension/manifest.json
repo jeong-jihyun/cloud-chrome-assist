@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Cloud Chrome 로그인 보내기",
+  "version": "1.0",
+  "description": "PC 크롬의 로그인(쿠키)을 클라우드 크롬으로 보내 같은 계정으로 로그인된 상태를 만듭니다.",
+  "permissions": ["cookies", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Cloud Chrome 로그인 보내기",
+    "default_popup": "popup.html"
+  }
+}
