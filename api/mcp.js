@@ -47,6 +47,8 @@ const TOOLS = [
   { name: 'browser_request_done', description: '요청을 처리한 뒤 완료로 표시하고 한 줄 결과를 남긴다(폰 화면의 요청 목록에 보인다).', inputSchema: obj({ id: { type: 'string' }, result: { type: 'string' } }, ['id']) },
   { name: 'browser_live_view', description: '사용자가 폰에서 직접 로그인할 수 있는 라이브 화면 링크를 돌려준다. 비밀번호/2단계 인증/캡처는 이걸로 사용자가 직접 한다.', inputSchema: obj() },
   { name: 'browser_cookies_info', description: 'PC 크롬 확장으로 보낸 로그인이 클라우드 크롬에 들어왔는지 확인한다. 들어 있는 쿠키 수와 사이트(도메인)별 개수를 보여준다.', inputSchema: obj() },
+  { name: 'browser_device', description: '모바일 기기 흉내(에뮬레이션)를 켜거나 끈다. device에 기기명(예: "iPhone 15", "Pixel 7")을 주면 화면 크기·터치·브라우저 정보(user-agent)를 그 폰처럼 맞춰 사이트가 모바일 화면으로 뜬다. device를 "off"로 주면 데스크톱으로 되돌린다. 기기 목록은 browser_devices.', inputSchema: obj({ device: { type: 'string' } }, ['device']) },
+  { name: 'browser_devices', description: '에뮬레이션에 쓸 수 있는 기기 이름 목록을 보여준다.', inputSchema: obj() },
   { name: 'browser_stop', description: '크롬과 샌드박스를 끈다(로그인 정보는 저장됨). 작업이 끝나면 호출해 한도를 아낀다.', inputSchema: obj() },
 ];
 
@@ -62,6 +64,8 @@ const ACTION = {
   browser_extension_remove: (a) => ({ action: 'ext_remove', name: a.name, restart: a.restart }),
   browser_extension_open: (a) => ({ action: 'ext_open', name: a.name, page: a.page }),
   browser_cookies_info: () => ({ action: 'cookies_info' }),
+  browser_device: (a) => ({ action: 'set_device', device: a.device }),
+  browser_devices: () => ({ action: 'list_devices' }),
   browser_requests: (a) => ({ action: 'request_list', all: !!a.all }),
   browser_request_done: (a) => ({ action: 'request_done', id: a.id, result: a.result }),
   browser_tabs: () => ({ action: 'tabs' }),

@@ -16,6 +16,10 @@ const PROFILE = path.join(ROOT, 'profile');
 const VIEW = { width: 1100, height: 720 };
 // Size of every tab, in CSS pixels, plus the pixel density. The phone reports its own size (see 'viewport' below).
 let VIEWSPEC = { w: VIEW.width, h: VIEW.height, dpr: 1 };
+// 모바일 에뮬레이션: 기기 프로필(null이면 데스크톱). Playwright의 devices[name]에서 가져온다.
+let emuDevice = null;
+let lastPhoneView = { w: VIEW.width, h: VIEW.height, dpr: 1 }; // 폰이 알려준 실제 화면 크기(에뮬레이션 끌 때 복귀용)
+let baseUA = ''; // 데스크톱 기본 user-agent(에뮬레이션 해제 시 되돌리기용)
 let inputUntil = 0; // pictures pause until this time (set while a tap is being delivered)
 const viewSessions = new Map(); // page -> CDP session that holds the size override (it must stay open to keep it)
 
@@ -93,7 +97,11 @@ async function applyView(p) {
   try {
     let sess = viewSessions.get(p);
     if (!sess) { sess = await ctx.newCDPSession(p); viewSessions.set(p, sess); p.on('close', () => viewSessions.delete(p)); }
-    await sess.send('Emulation.setDeviceMetricsOverride', { width: VIEWSPEC.w, height: VIEWSPEC.h, deviceScaleFactor: VIEWSPEC.dpr, mobile: false });
+    await sess.send('Emulation.setDeviceMetricsOverride', { width: VIEWSPEC.w, height: VIEWSPEC.h, deviceScaleFactor: VIEWSPEC.dpr, mobile: !!(emuDevice && emuDevice.mobile) });
+    // 모바일 에뮬레이션일 때는 터치와 user-agent도 그 기기처럼 맞춘다(사이트가 모바일 화면을 내보내도록). 데스크톱이면 원래대로 되돌린다.
+    try { await sess.send('Emulation.setTouchEmulationEnabled', { enabled: !!(emuDevice && emuDevice.hasTouch), maxTouchPoints: 5 }); } catch {}
+    const ua = emuDevice ? emuDevice.userAgent : baseUA;
+    if (ua) { try { await sess.send('Emulation.setUserAgentOverride', { userAgent: ua }); } catch {} }
   } catch {}
 }
 
@@ -161,6 +169,8 @@ async function ensure() {
   }
   const pages = ctx.pages();
   page = pages[pages.length - 1] || (await ctx.newPage());
+  // 데스크톱 기본 user-agent를 한 번만 기억해 둔다(에뮬레이션을 껐을 때 되돌리기 위함)
+  if (!baseUA && !emuDevice) { try { baseUA = await page.evaluate(() => navigator.userAgent); } catch {} }
   return page;
 }
 
@@ -555,6 +565,33 @@ async function act(body) {
     const rows = Object.entries(byDomain).sort((x, y) => y[1] - x[1]).map(([d, n]) => '- ' + d + ': ' + n + '개');
     return { text: '클라우드 크롬에 들어 있는 쿠키 ' + cks.length + '개' + (rows.length ? '\n' + rows.slice(0, 40).join('\n') : ' (없음)') };
   }
+  if (a === 'set_device') {
+    const name = String(body.device || '').trim();
+    const off = !name || /^(off|desktop|none|끄기|해제|데스크톱)$/i.test(name);
+    if (off) {
+      emuDevice = null;
+      VIEWSPEC = { w: lastPhoneView.w, h: lastPhoneView.h, dpr: lastPhoneView.dpr };
+    } else {
+      const d = pw.devices[name];
+      if (!d) {
+        const sample = ['iPhone 15', 'iPhone 15 Pro', 'iPhone 15 Pro Max', 'Pixel 7', 'Galaxy S24', 'iPad Pro 11'].filter((n) => pw.devices[n]);
+        throw new Error('모르는 기기: "' + name + '". 예: ' + sample.join(', ') + ' (목록은 list_devices)');
+      }
+      emuDevice = { name, userAgent: d.userAgent, mobile: !!d.isMobile, hasTouch: !!d.hasTouch, dpr: d.deviceScaleFactor || 1, w: d.viewport.width, h: d.viewport.height };
+      VIEWSPEC = { w: emuDevice.w, h: emuDevice.h, dpr: emuDevice.dpr };
+    }
+    await ensure();
+    for (const pg of livePages()) await ensureView(pg);
+    try { if (page && !page.isClosed()) await page.reload({ timeout: 15000 }); } catch {}
+    return { text: emuDevice
+      ? '모바일 에뮬레이션 켜짐: ' + emuDevice.name + ' (' + VIEWSPEC.w + '×' + VIEWSPEC.h + ' @' + VIEWSPEC.dpr + 'x, 터치 ' + (emuDevice.hasTouch ? '켜짐' : '꺼짐') + '). 이제 사이트가 모바일 화면으로 뜹니다.'
+      : '에뮬레이션 꺼짐(데스크톱으로 복귀).' };
+  }
+  if (a === 'list_devices') {
+    const names = Object.keys(pw.devices);
+    const picked = names.filter((n) => /iPhone 1[2-9]|iPhone SE|Pixel [5-9]|Galaxy S2[0-9]|iPad/.test(n) && !/landscape/i.test(n));
+    return { text: '쓸 수 있는 기기 ' + names.length + '개. 자주 쓰는 것:\n' + picked.slice(0, 30).join(', ') + '\n\n끄려면 device를 "off"로.' };
+  }
   if (a === 'ext_list') {
     const list = extList();
     return { text: list.length ? list.map((e) => '- ' + e.name + ' v' + e.version + ' (폴더 ' + e.slug + ', MV' + e.mv + ', ID ' + e.id + (e.running ? ', 실행 중' : '') + ')' + (e.popup ? '\n    팝업: ' + e.popup : '') + (e.options ? '\n    설정: ' + e.options : '')).join('\n') : '장착된 확장 프로그램이 없습니다.' };
@@ -895,7 +932,9 @@ wss.on('connection', async (ws) => {
       else if (d.t === 'viewport') {
         // the phone tells its screen size: make every tab exactly that big, then restart the picture at the new size
         const cl = (v, a, b) => Math.min(b, Math.max(a, v));
-        VIEWSPEC = { w: cl(Math.round(Number(d.w)) || VIEW.width, 200, 4000), h: cl(Math.round(Number(d.h)) || VIEW.height, 200, 6000), dpr: cl(Number(d.dpr) || 1, 0.25, 3) };
+        lastPhoneView = { w: cl(Math.round(Number(d.w)) || VIEW.width, 200, 4000), h: cl(Math.round(Number(d.h)) || VIEW.height, 200, 6000), dpr: cl(Number(d.dpr) || 1, 0.25, 3) };
+        // 모바일 에뮬레이션 중이면 폰 크기로 덮지 않고 기기 크기를 유지한다
+        if (!emuDevice) VIEWSPEC = { w: lastPhoneView.w, h: lastPhoneView.h, dpr: lastPhoneView.dpr };
         // Requests that arrive close together (the screen size can settle in two steps) are merged: only the last one is applied.
         healCount = 0;
         clearTimeout(viewTimer);
